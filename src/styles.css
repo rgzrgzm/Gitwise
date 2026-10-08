@@ -13,3 +13,10 @@ button:focus-visible,input:focus-visible { outline:2px solid var(--brand); outli
 .saved-repo-row:hover .saved-remove,.saved-remove:focus-visible { opacity:1; }
 .saved-remove:hover { color:var(--red); background:var(--red-soft); }
 .saved-empty { padding:5px 10px 10px; color:var(--muted); font-size:11px; line-height:1.4; }
+.empty-home { min-height:560px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:30px; }
+.empty-hero { width:430px; display:flex; flex-direction:column; align-items:center; text-align:center; padding:28px; border:1px solid var(--border); border-radius:16px; background:var(--surface); box-shadow:var(--shadow); }
+.empty-mark { width:56px; height:56px; display:grid; place-items:center; margin-bottom:18px; color:var(--brand); background:var(--brand-soft); border-radius:16px; }
+.empty-hero h1 { margin:8px 0 10px; }
+.empty-hero p { color:var(--text-2); font-size:14px; line-height:1.55; margin-bottom:20px; }
+.empty-notes { display:flex; gap:20px; color:var(--muted); font-size:11px; }
+.empty-notes div { display:flex; align-items:center; gap:6px; }

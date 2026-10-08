@@ -36,7 +36,7 @@ function App() {
   const [dark, setDark] = useState(false);
   const [repoPath, setRepoPath] = useState('');
   const [savedRepos, setSavedRepos] = useState<string[]>([]);
-  const [branch, setBranch] = useState('develop');
+  const [branch, setBranch] = useState('');
   const [branchMenu, setBranchMenu] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [selectedCommit, setSelectedCommit] = useState<Commit | null>(null);
@@ -132,7 +132,7 @@ function App() {
 
         <div className="content-scroll">
           {notice && <div className={notice.includes('Demo') ? 'notice demo' : 'notice'}><div className="notice-icon"><Sparkles size={15} /></div><span>{notice}</span><button onClick={() => setNotice(null)} aria-label="Dismiss notification"><X size={15} /></button></div>}
-          {view === 'Home' && (repoData ? <LiveHomeView repoName={repoName} branch={branch} setView={setView} runAction={runAction} selectedCommit={selectedCommit} setSelectedCommit={setSelectedCommit} repoData={repoData} commits={liveCommits} /> : <HomeView repoName={repoName} branch={branch} setView={setView} runAction={runAction} selectedCommit={selectedCommit} setSelectedCommit={setSelectedCommit} repoData={repoData} commits={liveCommits} />)}
+          {view === 'Home' && (repoData ? <LiveHomeView repoName={repoName} branch={branch} setView={setView} runAction={runAction} selectedCommit={selectedCommit} setSelectedCommit={setSelectedCommit} repoData={repoData} commits={liveCommits} /> : <EmptyHomeView onOpen={chooseRepo} />)}
           {view === 'Changes' && <ChangesView files={repoData ? repoData.files.map((file) => ({ path: file.path, state: file.index !== ' ' ? file.index : file.worktree, note: 'Live from Git', tone: file.index === '?' || file.worktree === '?' ? 'green' : 'blue' })) : files} runAction={runAction} operate={operate} />}
           {view === 'Branches' && <BranchesView branch={branch} setBranch={setBranch} operate={operate} />}
           {view === 'Pull requests' && <PullRequestView />}
@@ -141,6 +141,10 @@ function App() {
       </main>
     </div>
   );
+}
+
+function EmptyHomeView({ onOpen }: { onOpen: () => void }) {
+  return <div className="page empty-home"><div className="empty-hero"><div className="empty-mark"><FolderOpen size={28} /></div><span className="eyebrow">Get started</span><h1>Open a repository</h1><p>Choose an existing local Git repository to see its branches, changes, commits, and sync status here.</p><button className="primary-button" onClick={onOpen}><FolderOpen size={16} />Open local repository</button></div><div className="empty-notes"><div><CheckCircle2 size={16} /><span>Local Git stays available even without GitHub.</span></div><div><GitBranch size={16} /><span>Saved repositories reopen from the sidebar.</span></div><div><CloudOff size={16} /><span>GitHub collaboration connects separately.</span></div></div></div>;
 }
 
 function LiveHomeView({ repoName, branch, setView, runAction, selectedCommit, setSelectedCommit, repoData, commits: activity }: { repoName: string; branch: string; setView: (v: View) => void; runAction: (l: string) => void; selectedCommit: Commit | null; setSelectedCommit: (c: Commit | null) => void; repoData: RepoData; commits: Commit[] }) {
