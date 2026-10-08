@@ -175,6 +175,47 @@ async function disconnectGitHub() {
   return { ok: true };
 }
 
+function githubApiError(status: number, body: unknown) {
+  const message = body && typeof body === 'object' && typeof (body as { message?: unknown }).message === 'string' ? (body as { message: string }).message : '';
+  if (status === 401) return 'GitHub rejected the saved token. Disconnect and connect a valid token again.';
+  if (status === 403 && /rate limit/i.test(message)) return 'GitHub API rate limit reached. Wait for GitHub to reset the limit, then refresh.';
+  if (status === 403) return 'GitHub denied access to this repository. Check the token permissions and repository access.';
+  if (status === 404) return 'This GitHub repository is unavailable to the connected account. Check the remote and token access.';
+  if (status === 0) return 'GitHub could not be reached. Check your network connection and try again.';
+  return 'GitHub could not load pull requests for this repository.';
+}
+
+async function getGitHubPullRequests(candidate: unknown) {
+  const repository = await resolveRepository(candidate);
+  if (!repository.ok) return { ok: false, error: repository.error, pullRequests: [] };
+  const [token, remote] = await Promise.all([readGitHubToken(), getGitHubRemote(repository.path)]);
+  if (!token.ok || !token.token) return { ok: false, error: token.error || 'Connect GitHub before loading pull requests.', pullRequests: [] };
+  if (!remote) return { ok: false, error: 'No github.com remote is configured for this repository.', pullRequests: [] };
+  const response = await githubRequest(`/repos/${encodeURIComponent(remote.owner)}/${encodeURIComponent(remote.name)}/pulls?state=open&sort=updated&direction=desc&per_page=50`, token.token);
+  if (!response.ok || !Array.isArray(response.body)) return { ok: false, error: githubApiError(response.status, response.body), pullRequests: [] };
+  const pullRequests = response.body.flatMap((item) => {
+    if (!item || typeof item !== 'object') return [];
+    const pull = item as Record<string, unknown>;
+    const number = pull.number; const title = pull.title; const url = pull.html_url;
+    const user = pull.user as Record<string, unknown> | null;
+    const head = pull.head as Record<string, unknown> | null;
+    const base = pull.base as Record<string, unknown> | null;
+    if (typeof number !== 'number' || typeof title !== 'string' || typeof url !== 'string') return [];
+    return [{ number, title, url, draft: Boolean(pull.draft), updatedAt: typeof pull.updated_at === 'string' ? pull.updated_at : null, author: typeof user?.login === 'string' ? user.login : 'Unknown author', authorAvatarUrl: typeof user?.avatar_url === 'string' ? user.avatar_url : null, head: typeof head?.label === 'string' ? head.label : 'Unknown branch', base: typeof base?.label === 'string' ? base.label : 'Unknown branch', comments: typeof pull.comments === 'number' ? pull.comments : 0, reviewComments: typeof pull.review_comments === 'number' ? pull.review_comments : 0 }];
+  });
+  return { ok: true, pullRequests, checkedAt: new Date().toISOString() };
+}
+
+async function openGitHubUrl(candidate: unknown) {
+  if (typeof candidate !== 'string') return { ok: false };
+  try {
+    const url = new URL(candidate);
+    if (url.protocol !== 'https:' || !['github.com', 'www.github.com'].includes(url.hostname)) return { ok: false };
+    await shell.openExternal(url.toString());
+    return { ok: true };
+  } catch { return { ok: false }; }
+}
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1440,
@@ -212,6 +253,8 @@ app.whenReady().then(() => {
   ipcMain.handle('github:status', (_, repoPath: unknown) => getGitHubStatus(repoPath));
   ipcMain.handle('github:connect', (_, token: unknown) => connectGitHub(token));
   ipcMain.handle('github:disconnect', () => disconnectGitHub());
+  ipcMain.handle('github:pull-requests', (_, repoPath: unknown) => getGitHubPullRequests(repoPath));
+  ipcMain.handle('github:open-url', (_, url: unknown) => openGitHubUrl(url));
   ipcMain.handle('repo:diff', (_, repoPath: unknown, options?: { path?: string; staged?: boolean; base?: string; compare?: string }) => getDiff(repoPath, options));
   ipcMain.handle('repo:operations', (_, repoPath: unknown) => typeof repoPath === 'string' ? operationLog.filter((item) => item.repositoryPath === path.resolve(repoPath)) : []);
   ipcMain.handle('git:operate', (_, repoPath: unknown, operation: GitOperation) => operateGit(repoPath, operation));

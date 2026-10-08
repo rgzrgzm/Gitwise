@@ -24,7 +24,7 @@ npm run build
 - Review real staged, unstaged, and untracked files; stage or unstage whole files or individual text-diff hunks, discard with confirmation, create stashes, apply or restore a selected stash, and commit staged work.
 - Search local commit messages, load history in pages, and inspect commit metadata, changed files, and file diffs.
 
-GitHub account linking is available from the Pull requests and Activity workspaces. Gitwise validates a fine-grained personal access token, stores it using Electron's platform credential protection, and detects a matching github.com remote. Pull requests, reviews, checks, and shared team activity are not loaded yet; those screens state that limitation instead of showing fabricated collaboration data.
+GitHub account linking is available from the Pull requests and Activity workspaces. Gitwise validates a fine-grained personal access token, stores it using Electron's platform credential protection, and detects a matching github.com remote. The Pull requests workspace now loads real open pull requests and opens the selected item on GitHub. Reviews, checks, pull-request creation, and shared team activity are not loaded yet; those screens state that limitation instead of showing fabricated collaboration data.
 
 ## Security model
 
@@ -34,4 +34,4 @@ Git transport credentials remain managed by your existing Git credential helper 
 
 ## Connect GitHub
 
-Create a fine-grained personal access token in GitHub **Settings → Developer settings → Personal access tokens**, then open **Pull requests** or **Activity** in Gitwise and connect it there. The token is verified against your GitHub account before Gitwise saves it. For the upcoming repository collaboration features, limit the token to the repositories you intend to use and grant only the read permissions GitHub requires for the data you choose to load.
+Create a fine-grained personal access token in GitHub **Settings → Developer settings → Personal access tokens**, then open **Pull requests** or **Activity** in Gitwise and connect it there. The token is verified against your GitHub account before Gitwise saves it. To load private-repository pull requests, select the repository when creating the token and grant the repository pull-request read permission. Limit the token to the repositories and read permissions you intend to use.
