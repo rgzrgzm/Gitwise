@@ -5,7 +5,7 @@ declare global {
     branchline?: {
       chooseRepository: () => Promise<string | null>;
       inspectRepository: (repoPath: string) => Promise<unknown>;
-      runGit: (repoPath: string, args: string[]) => Promise<unknown>;
+      operateGit: (repoPath: string, operation: unknown) => Promise<{ ok: boolean; stdout?: string; stderr?: string }>;
     };
   }
 }

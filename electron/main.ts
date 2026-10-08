@@ -4,6 +4,19 @@ import { promisify } from 'node:util';
 import path from 'node:path';
 
 const execFileAsync = promisify(execFile);
+
+type GitOperation =
+  | { type: 'fetch'; remote?: string }
+  | { type: 'pull' }
+  | { type: 'push' }
+  | { type: 'stage'; paths: string[] }
+  | { type: 'unstage'; paths: string[] }
+  | { type: 'commit'; message: string }
+  | { type: 'create-branch'; name: string; startPoint?: string }
+  | { type: 'switch-branch'; name: string };
+
+const activeOperations = new Set<string>();
+
 async function git(args: string[], cwd: string) {
   try {
     const result = await execFileAsync('git', args, { cwd, windowsHide: true, maxBuffer: 1024 * 1024 * 4 });
@@ -39,7 +52,7 @@ app.whenReady().then(() => {
     return selection.canceled ? null : selection.filePaths[0];
   });
   ipcMain.handle('repo:inspect', (_, repoPath: string) => inspectRepository(repoPath));
-  ipcMain.handle('git:run', (_, payload: { repoPath: string; args: string[] }) => git(payload.args, payload.repoPath));
+  ipcMain.handle('git:operate', (_, payload: { repoPath: string; operation: GitOperation }) => operateGit(payload.repoPath, payload.operation));
   createWindow();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
@@ -54,5 +67,43 @@ async function inspectRepository(repoPath: string) {
     git(['rev-list', '--left-right', '--count', 'HEAD...@{upstream}'], repoPath),
     git(['log', '-8', '--format=%H%x1f%h%x1f%an%x1f%ar%x1f%s'], repoPath)
   ]);
-  return { branch: branch.stdout, status: status.stdout, remotes: remotes.stdout, counts: counts.stdout, log: log.stdout, ok: branch.ok };
+  const lines = status.stdout.split(/\r?\n/).filter(Boolean);
+  const files = lines.filter((line) => !line.startsWith('## ')).map((line) => ({ index: line[0], worktree: line[1], path: line.slice(3) }));
+  const countParts = counts.ok ? counts.stdout.split(/\s+/).map(Number) : [0, 0];
+  return {
+    branch: branch.stdout,
+    status: status.stdout,
+    files,
+    remotes: remotes.stdout,
+    counts: { ahead: countParts[0] || 0, behind: countParts[1] || 0 },
+    log: log.stdout,
+    ok: branch.ok
+  };
+}
+
+async function operateGit(repoPath: string, operation: GitOperation) {
+  if (activeOperations.has(repoPath)) return { ok: false, stderr: 'Another Git operation is already running for this repository.' };
+  activeOperations.add(repoPath);
+  try {
+    let args: string[];
+    switch (operation.type) {
+      case 'fetch': args = ['fetch', operation.remote || '--all', '--prune']; break;
+      case 'pull': args = ['pull', '--ff-only']; break;
+      case 'push': args = ['push']; break;
+      case 'stage': args = ['add', '--', ...safePaths(operation.paths)]; break;
+      case 'unstage': args = ['restore', '--staged', '--', ...safePaths(operation.paths)]; break;
+      case 'commit':
+        if (!operation.message.trim()) return { ok: false, stderr: 'Commit message cannot be empty.' };
+        args = ['commit', '-m', operation.message.trim()]; break;
+      case 'create-branch':
+        if (!/^[A-Za-z0-9._/-]+$/.test(operation.name)) return { ok: false, stderr: 'Branch name contains unsupported characters.' };
+        args = ['switch', '-c', operation.name, ...(operation.startPoint ? [operation.startPoint] : [])]; break;
+      case 'switch-branch': args = ['switch', operation.name]; break;
+    }
+    return await git(args, repoPath);
+  } finally { activeOperations.delete(repoPath); }
+}
+
+function safePaths(paths: string[]) {
+  return paths.filter((value) => value && value !== '.' && value !== '..' && !value.includes('\0'));
 }
