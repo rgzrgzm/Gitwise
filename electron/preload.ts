@@ -9,5 +9,6 @@ contextBridge.exposeInMainWorld('branchline', {
   getHistory: (repoPath: string, limit = 50, skip = 0) => ipcRenderer.invoke('repo:history', repoPath, limit, skip),
   getBranches: (repoPath: string) => ipcRenderer.invoke('repo:branches', repoPath),
   getDiff: (repoPath: string, options: unknown) => ipcRenderer.invoke('repo:diff', repoPath, options),
+  getOperations: (repoPath: string) => ipcRenderer.invoke('repo:operations', repoPath),
   operateGit: (repoPath: string, operation: unknown) => ipcRenderer.invoke('git:operate', repoPath, operation)
 });

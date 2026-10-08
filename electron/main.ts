@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
@@ -13,6 +13,7 @@ type GitOperation =
   | { type: 'stage'; paths: string[] }
   | { type: 'unstage'; paths: string[] }
   | { type: 'discard'; paths: string[] }
+  | { type: 'trash-untracked'; paths: string[] }
   | { type: 'commit'; message: string }
   | { type: 'stash'; message?: string }
   | { type: 'stash-pop' }
@@ -26,6 +27,7 @@ type GitOperation =
   | { type: 'merge-abort' };
 
 const activeOperations = new Set<string>();
+const operationLog: Array<{ id: string; repositoryPath: string; label: string; ok: boolean; at: string; detail: string }> = [];
 
 async function resolveRepository(candidate: unknown) {
   if (typeof candidate !== 'string' || !candidate.trim()) return { ok: false as const, error: 'Choose a repository before continuing.' };
@@ -39,6 +41,30 @@ async function resolveRepository(candidate: unknown) {
 
 function validRef(value: unknown) { return typeof value === 'string' && value.length > 0 && value.length < 250 && !value.startsWith('-') && !/[\0~^:?*\\\[\s]/.test(value) && !value.includes('..') && !value.endsWith('.') && !value.endsWith('/'); }
 function validPaths(paths: unknown): paths is string[] { return Array.isArray(paths) && paths.length > 0 && paths.every((item) => typeof item === 'string' && item.length > 0 && !path.isAbsolute(item) && !item.includes('\0') && !item.split(/[\\/]/).includes('..')); }
+function cleanGitError(value: string) { return value.replace(/(https?:\/\/)[^\s/@]+@/gi, '$1***@').replace(/(gh[pousr]_[A-Za-z0-9_]+)/g, '***').trim(); }
+function recordOperation(repositoryPath: string, label: string, ok: boolean, detail: string) { operationLog.unshift({ id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, repositoryPath, label, ok, at: new Date().toISOString(), detail: cleanGitError(detail) }); operationLog.splice(30); }
+function validateOperation(value: unknown): GitOperation | null {
+  if (!value || typeof value !== 'object' || typeof (value as { type?: unknown }).type !== 'string') return null;
+  const operation = value as Record<string, unknown>;
+  switch (operation.type) {
+    case 'fetch': return { type: 'fetch' };
+    case 'pull': return ['ff-only', 'merge', 'rebase'].includes(String(operation.strategy || 'ff-only')) ? { type: 'pull', strategy: (operation.strategy || 'ff-only') as 'ff-only' | 'merge' | 'rebase' } : null;
+    case 'push': return typeof operation.setUpstream === 'boolean' || operation.setUpstream === undefined ? { type: 'push', setUpstream: Boolean(operation.setUpstream) } : null;
+    case 'stage': case 'unstage': case 'discard': case 'trash-untracked': return validPaths(operation.paths) ? { type: operation.type, paths: operation.paths } as GitOperation : null;
+    case 'commit': return typeof operation.message === 'string' ? { type: 'commit', message: operation.message } : null;
+    case 'stash': return operation.message === undefined || typeof operation.message === 'string' ? { type: 'stash', message: operation.message as string | undefined } : null;
+    case 'stash-pop': return { type: 'stash-pop' };
+    case 'create-branch': return typeof operation.name === 'string' && (operation.startPoint === undefined || typeof operation.startPoint === 'string') ? { type: 'create-branch', name: operation.name, startPoint: operation.startPoint as string | undefined } : null;
+    case 'switch-branch': return typeof operation.name === 'string' ? { type: 'switch-branch', name: operation.name } : null;
+    case 'rename-branch': return typeof operation.oldName === 'string' && typeof operation.newName === 'string' ? { type: 'rename-branch', oldName: operation.oldName, newName: operation.newName } : null;
+    case 'delete-local-branch': return typeof operation.name === 'string' && (operation.force === undefined || typeof operation.force === 'boolean') ? { type: 'delete-local-branch', name: operation.name, force: Boolean(operation.force) } : null;
+    case 'delete-remote-branch': return typeof operation.remote === 'string' && typeof operation.name === 'string' ? { type: 'delete-remote-branch', remote: operation.remote, name: operation.name } : null;
+    case 'merge': return typeof operation.source === 'string' ? { type: 'merge', source: operation.source } : null;
+    case 'merge-continue': return { type: 'merge-continue' };
+    case 'merge-abort': return { type: 'merge-abort' };
+    default: return null;
+  }
+}
 
 async function git(args: string[], cwd: string) {
   try {
@@ -81,6 +107,7 @@ app.whenReady().then(() => {
   ipcMain.handle('repo:history', (_, repoPath: unknown, limit?: number, skip?: number) => getHistory(repoPath, limit, skip));
   ipcMain.handle('repo:branches', (_, repoPath: unknown) => getBranches(repoPath));
   ipcMain.handle('repo:diff', (_, repoPath: unknown, options?: { path?: string; staged?: boolean; base?: string; compare?: string }) => getDiff(repoPath, options));
+  ipcMain.handle('repo:operations', (_, repoPath: unknown) => typeof repoPath === 'string' ? operationLog.filter((item) => item.repositoryPath === path.resolve(repoPath)) : []);
   ipcMain.handle('git:operate', (_, repoPath: unknown, operation: GitOperation) => operateGit(repoPath, operation));
   createWindow();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
@@ -91,13 +118,16 @@ app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(
 async function inspectRepository(candidate: unknown) {
   const repository = await resolveRepository(candidate);
   if (!repository.ok) return { ok: false, error: repository.error };
-  const [branch, status, upstream, remotes, identity, mergeHead, log] = await Promise.all([
+  const [branch, status, upstream, remotes, identity, mergeHead, rebaseHead, cherryPickHead, revertHead, log] = await Promise.all([
     git(['branch', '--show-current'], repository.path),
     git(['status', '--porcelain=v1', '-z'], repository.path),
     git(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'], repository.path),
     git(['remote'], repository.path),
     git(['config', '--get-regexp', '^user\\.(name|email)$'], repository.path),
     git(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], repository.path),
+    git(['rev-parse', '-q', '--verify', 'REBASE_HEAD'], repository.path),
+    git(['rev-parse', '-q', '--verify', 'CHERRY_PICK_HEAD'], repository.path),
+    git(['rev-parse', '-q', '--verify', 'REVERT_HEAD'], repository.path),
     git(['log', '-50', '--date=iso-strict', '--decorate=short', '--format=%H%x1f%h%x1f%an%x1f%ae%x1f%ad%x1f%D%x1f%s'], repository.path)
   ]);
   const upstreamName = upstream.ok ? upstream.stdout.trim() : null;
@@ -125,52 +155,68 @@ async function inspectRepository(candidate: unknown) {
     counts: { ahead: ahead || 0, behind: behind || 0 },
     files,
     identity: { name: values['user.name'] || null, email: values['user.email'] || null },
-    operation: mergeHead.ok ? 'merge' : null,
+    operation: mergeHead.ok ? 'merge' : rebaseHead.ok ? 'rebase' : cherryPickHead.ok ? 'cherry-pick' : revertHead.ok ? 'revert' : null,
     log: log.stdout,
     checkedAt: new Date().toISOString()
   };
 }
 
-async function operateGit(candidate: unknown, operation: GitOperation) {
+async function operateGit(candidate: unknown, operation: unknown) {
   const repository = await resolveRepository(candidate);
   if (!repository.ok) return { ok: false, stdout: '', stderr: repository.error };
-  if (!operation || typeof operation !== 'object' || !('type' in operation)) return { ok: false, stdout: '', stderr: 'Unknown Git operation.' };
+  const request = validateOperation(operation);
+  if (!request) return { ok: false, stdout: '', stderr: 'This Git operation has invalid input.' };
   if (activeOperations.has(repository.path)) return { ok: false, stdout: '', stderr: 'Another Git operation is already running for this repository.' };
   activeOperations.add(repository.path);
   try {
     const snapshot = await inspectRepository(repository.path);
     if (!snapshot.ok || !snapshot.identity || !snapshot.files) return { ok: false, stdout: '', stderr: snapshot.ok ? 'Unable to inspect this repository.' : snapshot.error };
+    if (snapshot.operation && !['merge-continue', 'merge-abort'].includes(request.type)) return { ok: false, stdout: '', stderr: `Finish or abort the active ${snapshot.operation} before starting another operation.` };
     let args: string[];
-    switch (operation.type) {
+    switch (request.type) {
       case 'fetch': args = ['fetch', '--all', '--prune']; break;
       case 'pull':
         if (!snapshot.upstream) return { ok: false, stdout: '', stderr: 'This branch has no upstream. Publish it before pulling.' };
-        args = operation.strategy === 'rebase' ? ['pull', '--rebase'] : operation.strategy === 'merge' ? ['pull', '--no-rebase'] : ['pull', '--ff-only']; break;
+        args = request.strategy === 'rebase' ? ['pull', '--rebase'] : request.strategy === 'merge' ? ['pull', '--no-rebase'] : ['pull', '--ff-only']; break;
       case 'push':
         if (!snapshot.branch) return { ok: false, stdout: '', stderr: 'Cannot push while HEAD is detached. Switch to a branch first.' };
-        args = operation.setUpstream ? ['push', '--set-upstream', 'origin', snapshot.branch] : ['push']; break;
-      case 'stage': if (!validPaths(operation.paths)) return { ok: false, stdout: '', stderr: 'Choose valid files to stage.' }; args = ['add', '--', ...operation.paths]; break;
-      case 'unstage': if (!validPaths(operation.paths)) return { ok: false, stdout: '', stderr: 'Choose valid files to unstage.' }; args = ['restore', '--staged', '--', ...operation.paths]; break;
-      case 'discard': if (!validPaths(operation.paths)) return { ok: false, stdout: '', stderr: 'Choose valid files to discard.' }; args = ['restore', '--worktree', '--', ...operation.paths]; break;
+        args = request.setUpstream ? ['push', '--set-upstream', 'origin', snapshot.branch] : ['push']; break;
+      case 'stage': args = ['add', '--', ...request.paths]; break;
+      case 'unstage': args = ['restore', '--staged', '--', ...request.paths]; break;
+      case 'discard':
+        if (request.paths.some((filePath) => !snapshot.files.some((file) => file.path === filePath && file.kind === 'tracked' && file.worktree !== ' '))) return { ok: false, stdout: '', stderr: 'Only unstaged tracked changes can be discarded here. Unstage staged files or move untracked files to the Recycle Bin.' };
+        args = ['restore', '--worktree', '--', ...request.paths]; break;
+      case 'trash-untracked': {
+        if (request.paths.some((filePath) => !snapshot.files.some((file) => file.path === filePath && file.kind === 'untracked'))) return { ok: false, stdout: '', stderr: 'Only untracked files can be moved to the Recycle Bin.' };
+        try { for (const relativePath of request.paths) {
+          const target = path.resolve(repository.path, relativePath);
+          if (!target.startsWith(`${repository.path}${path.sep}`)) return { ok: false, stdout: '', stderr: 'Invalid untracked file path.' };
+          await shell.trashItem(target);
+        } } catch { return { ok: false, stdout: '', stderr: 'Gitwise could not move the selected untracked file to the Recycle Bin.' }; }
+        recordOperation(repository.path, 'Move untracked files to Recycle Bin', true, request.paths.join(', '));
+        return { ok: true, stdout: 'Moved selected untracked files to the Recycle Bin.', stderr: '' };
+      }
       case 'commit':
-        if (!operation.message.trim()) return { ok: false, stderr: 'Commit message cannot be empty.' };
+        if (!request.message.trim()) return { ok: false, stdout: '', stderr: 'Commit message cannot be empty.' };
         if (!snapshot.identity.name || !snapshot.identity.email) return { ok: false, stdout: '', stderr: 'Configure your Git author name and email before committing.' };
         if (!snapshot.files.some((file) => file.index !== ' ' && file.index !== '?')) return { ok: false, stdout: '', stderr: 'Stage at least one change before committing.' };
-        args = ['commit', '-m', operation.message.trim()]; break;
-      case 'stash': args = ['stash', 'push', '-u', ...(operation.message?.trim() ? ['-m', operation.message.trim()] : [])]; break;
+        args = ['commit', '-m', request.message.trim()]; break;
+      case 'stash': args = ['stash', 'push', '-u', ...(request.message?.trim() ? ['-m', request.message.trim()] : [])]; break;
       case 'stash-pop': args = ['stash', 'pop']; break;
       case 'create-branch':
-        if (!validRef(operation.name) || (operation.startPoint && !validRef(operation.startPoint))) return { ok: false, stdout: '', stderr: 'Use valid branch names.' };
-        args = ['switch', '-c', operation.name, ...(operation.startPoint ? [operation.startPoint] : [])]; break;
-      case 'switch-branch': if (!validRef(operation.name)) return { ok: false, stdout: '', stderr: 'Choose a valid branch.' }; args = ['switch', operation.name]; break;
-      case 'rename-branch': if (!validRef(operation.oldName) || !validRef(operation.newName)) return { ok: false, stdout: '', stderr: 'Use valid branch names.' }; args = ['branch', '-m', operation.oldName, operation.newName]; break;
-      case 'delete-local-branch': if (!validRef(operation.name) || operation.name === snapshot.branch) return { ok: false, stdout: '', stderr: 'Switch branches before deleting this branch.' }; args = ['branch', operation.force ? '-D' : '-d', operation.name]; break;
-      case 'delete-remote-branch': if (!validRef(operation.remote) || !validRef(operation.name)) return { ok: false, stdout: '', stderr: 'Choose a valid remote branch.' }; args = ['push', operation.remote, '--delete', operation.name]; break;
-      case 'merge': if (!validRef(operation.source)) return { ok: false, stdout: '', stderr: 'Choose a valid source branch.' }; if (snapshot.operation) return { ok: false, stdout: '', stderr: 'Finish or abort the current merge first.' }; args = ['merge', '--no-edit', operation.source]; break;
+        if (!validRef(request.name) || (request.startPoint && !validRef(request.startPoint))) return { ok: false, stdout: '', stderr: 'Use valid branch names.' };
+        args = ['switch', '-c', request.name, ...(request.startPoint ? [request.startPoint] : [])]; break;
+      case 'switch-branch': if (!validRef(request.name)) return { ok: false, stdout: '', stderr: 'Choose a valid branch.' }; args = ['switch', request.name]; break;
+      case 'rename-branch': if (!validRef(request.oldName) || !validRef(request.newName)) return { ok: false, stdout: '', stderr: 'Use valid branch names.' }; args = ['branch', '-m', request.oldName, request.newName]; break;
+      case 'delete-local-branch': if (!validRef(request.name) || request.name === snapshot.branch) return { ok: false, stdout: '', stderr: 'Switch branches before deleting this branch.' }; args = ['branch', request.force ? '-D' : '-d', request.name]; break;
+      case 'delete-remote-branch': if (!validRef(request.remote) || !validRef(request.name)) return { ok: false, stdout: '', stderr: 'Choose a valid remote branch.' }; args = ['push', request.remote, '--delete', request.name]; break;
+      case 'merge': if (!validRef(request.source)) return { ok: false, stdout: '', stderr: 'Choose a valid source branch.' }; args = ['merge', '--no-edit', request.source]; break;
       case 'merge-continue': args = ['merge', '--continue']; break;
       case 'merge-abort': args = ['merge', '--abort']; break;
     }
-    return await git(args, repository.path);
+    const result = await git(args, repository.path);
+    recordOperation(repository.path, request.type, result.ok, result.ok ? result.stdout : result.stderr);
+    return { ...result, stderr: cleanGitError(result.stderr) };
   } finally { activeOperations.delete(repository.path); }
 }
 

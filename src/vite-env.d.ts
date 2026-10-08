@@ -11,6 +11,7 @@ declare global {
       getHistory: (repoPath: string, limit?: number, skip?: number) => Promise<unknown>;
       getBranches: (repoPath: string) => Promise<unknown>;
       getDiff: (repoPath: string, options: unknown) => Promise<unknown>;
+      getOperations: (repoPath: string) => Promise<unknown>;
       operateGit: (repoPath: string, operation: unknown) => Promise<{ ok: boolean; stdout?: string; stderr?: string }>;
     };
   }
