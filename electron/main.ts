@@ -17,6 +17,8 @@ type GitOperation =
   | { type: 'commit'; message: string }
   | { type: 'stash'; message?: string }
   | { type: 'stash-pop' }
+  | { type: 'stash-apply'; stashId: string }
+  | { type: 'stash-pop-selected'; stashId: string }
   | { type: 'create-branch'; name: string; startPoint?: string }
   | { type: 'switch-branch'; name: string }
   | { type: 'rename-branch'; oldName: string; newName: string }
@@ -56,6 +58,7 @@ function validateOperation(value: unknown): GitOperation | null {
     case 'commit': return typeof operation.message === 'string' ? { type: 'commit', message: operation.message } : null;
     case 'stash': return operation.message === undefined || typeof operation.message === 'string' ? { type: 'stash', message: operation.message as string | undefined } : null;
     case 'stash-pop': return { type: 'stash-pop' };
+    case 'stash-apply': case 'stash-pop-selected': return typeof operation.stashId === 'string' && /^[0-9a-f]{40,64}$/i.test(operation.stashId) ? { type: operation.type, stashId: operation.stashId } as GitOperation : null;
     case 'create-branch': return typeof operation.name === 'string' && (operation.startPoint === undefined || typeof operation.startPoint === 'string') ? { type: 'create-branch', name: operation.name, startPoint: operation.startPoint as string | undefined } : null;
     case 'switch-branch': return typeof operation.name === 'string' ? { type: 'switch-branch', name: operation.name } : null;
     case 'rename-branch': return typeof operation.oldName === 'string' && typeof operation.newName === 'string' ? { type: 'rename-branch', oldName: operation.oldName, newName: operation.newName } : null;
@@ -108,7 +111,10 @@ app.whenReady().then(() => {
   ipcMain.handle('repo:save', (_, repoPath: string) => saveRepository(repoPath));
   ipcMain.handle('repo:remove', (_, repoPath: string) => removeRepository(repoPath));
   ipcMain.handle('repo:inspect', (_, repoPath: unknown) => inspectRepository(repoPath));
-  ipcMain.handle('repo:history', (_, repoPath: unknown, limit?: number, skip?: number) => getHistory(repoPath, limit, skip));
+  ipcMain.handle('repo:history', (_, repoPath: unknown, limit?: number, skip?: number, search?: unknown) => getHistory(repoPath, limit, skip, search));
+  ipcMain.handle('repo:stashes', (_, repoPath: unknown) => getStashes(repoPath));
+  ipcMain.handle('repo:commit-details', (_, repoPath: unknown, commitId: unknown) => getCommitDetails(repoPath, commitId));
+  ipcMain.handle('repo:commit-diff', (_, repoPath: unknown, commitId: unknown, filePath: unknown) => getCommitDiff(repoPath, commitId, filePath));
   ipcMain.handle('repo:branches', (_, repoPath: unknown) => getBranches(repoPath));
   ipcMain.handle('repo:diff', (_, repoPath: unknown, options?: { path?: string; staged?: boolean; base?: string; compare?: string }) => getDiff(repoPath, options));
   ipcMain.handle('repo:operations', (_, repoPath: unknown) => typeof repoPath === 'string' ? operationLog.filter((item) => item.repositoryPath === path.resolve(repoPath)) : []);
@@ -207,6 +213,14 @@ async function operateGit(candidate: unknown, operation: unknown) {
         args = ['commit', '-m', request.message.trim()]; break;
       case 'stash': args = ['stash', 'push', '-u', ...(request.message?.trim() ? ['-m', request.message.trim()] : [])]; break;
       case 'stash-pop': args = ['stash', 'pop']; break;
+      case 'stash-apply': case 'stash-pop-selected': {
+        const list = await getStashes(repository.path);
+        if (!list.ok) return { ok: false, stdout: '', stderr: list.error };
+        const selected = list.stashes.find((stash) => stash.id === request.stashId);
+        if (!selected) return { ok: false, stdout: '', stderr: 'That stash is no longer in this repository. Refresh the stash list and choose again.' };
+        args = ['stash', request.type === 'stash-apply' ? 'apply' : 'pop', selected.selector];
+        break;
+      }
       case 'create-branch':
         if (!validRef(request.name) || (request.startPoint && !validRef(request.startPoint))) return { ok: false, stdout: '', stderr: 'Use valid branch names.' };
         args = ['switch', '-c', request.name, ...(request.startPoint ? [request.startPoint] : [])]; break;
@@ -230,12 +244,81 @@ async function operateGit(candidate: unknown, operation: unknown) {
   } finally { activeOperations.delete(repository.path); }
 }
 
-async function getHistory(candidate: unknown, limit = 50, skip = 0) {
+async function getHistory(candidate: unknown, limit = 50, skip = 0, search: unknown = '') {
   const repository = await resolveRepository(candidate);
   if (!repository.ok) return { ok: false, error: repository.error };
-  const result = await git(['log', `--max-count=${Math.min(Math.max(Number(limit) || 50, 1), 200)}`, `--skip=${Math.max(Number(skip) || 0, 0)}`, '--date=iso-strict', '--decorate=short', '--format=%H%x1f%h%x1f%an%x1f%ae%x1f%ad%x1f%D%x1f%s'], repository.path);
+  if (typeof search !== 'string' || search.length > 200 || search.includes('\0')) return { ok: false, error: 'Search text must be 200 characters or fewer.' };
+  const pageSize = Math.min(Math.max(Math.floor(Number(limit) || 50), 1), 100);
+  const offset = Math.min(Math.max(Math.floor(Number(skip) || 0), 0), 10000000);
+  const args = ['log', `--max-count=${pageSize + 1}`, `--skip=${offset}`];
+  if (search.trim()) args.push('--fixed-strings', '--regexp-ignore-case', `--grep=${search.trim()}`);
+  args.push('--date=iso-strict', '--decorate=short', '--format=%H%x1f%h%x1f%an%x1f%ae%x1f%ad%x1f%D%x1f%s');
+  const result = await git(args, repository.path);
   if (!result.ok) return { ok: false, error: result.stderr };
-  return { ok: true, commits: result.stdout.split(/\r?\n/).filter(Boolean).map((line) => { const [id, shortId, author, email, date, refs, subject] = line.split('\x1f'); return { id, shortId, author, email, date, refs: refs ? refs.split(', ').filter(Boolean) : [], subject }; }) };
+  const rows = result.stdout.split(/\r?\n/).filter(Boolean);
+  const hasMore = rows.length > pageSize;
+  const commits = rows.slice(0, pageSize).map((line) => { const [id, shortId, author, email, date, refs, subject] = line.split('\x1f'); return { id, shortId, author, email, date, refs: refs ? refs.split(', ').filter(Boolean) : [], subject }; });
+  return { ok: true, commits, hasMore };
+}
+
+async function getStashes(candidate: unknown) {
+  const repository = await resolveRepository(candidate);
+  if (!repository.ok) return { ok: false, error: repository.error, stashes: [] };
+  const result = await git(['stash', 'list', '--format=%H%x00%gd%x00%gs%x00%an%x00%aI'], repository.path);
+  if (!result.ok) return { ok: false, error: result.stderr, stashes: [] };
+  const fields = result.stdout.split('\0').map((field) => field.replace(/^[\r\n]+|[\r\n]+$/g, ''));
+  const stashes: Array<{ id: string; selector: string; subject: string; author: string; date: string }> = [];
+  for (let index = 0; index + 4 < fields.length; index += 5) {
+    const [id, selector, subject, author, date] = fields.slice(index, index + 5);
+    if (/^[0-9a-f]{40,64}$/i.test(id) && /^stash@\{\d+\}$/.test(selector)) stashes.push({ id, selector, subject, author, date });
+  }
+  return { ok: true, stashes };
+}
+
+async function resolveCommit(repositoryPath: string, candidate: unknown) {
+  if (typeof candidate !== 'string' || !/^[0-9a-f]{7,40}$/i.test(candidate)) return { ok: false as const, error: 'Choose a valid commit from this repository.' };
+  const resolved = await git(['rev-parse', '--verify', `${candidate}^{commit}`], repositoryPath);
+  if (!resolved.ok) return { ok: false as const, error: 'That commit is not available in this repository.' };
+  return { ok: true as const, id: resolved.stdout.trim() };
+}
+
+async function getCommitDetails(candidate: unknown, commitCandidate: unknown) {
+  const repository = await resolveRepository(candidate);
+  if (!repository.ok) return { ok: false, error: repository.error };
+  const commit = await resolveCommit(repository.path, commitCandidate);
+  if (!commit.ok) return { ok: false, error: commit.error };
+  const [metadata, changed] = await Promise.all([
+    git(['show', '-s', '--format=%H%x1f%h%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%aI%x1f%P%x1f%B', commit.id], repository.path),
+    git(['diff-tree', '--root', '--no-commit-id', '--name-status', '-r', '-z', '--first-parent', commit.id], repository.path)
+  ]);
+  if (!metadata.ok) return { ok: false, error: metadata.stderr };
+  if (!changed.ok) return { ok: false, error: changed.stderr };
+  const [id, shortId, author, authorEmail, committer, committerEmail, date, parents, ...message] = metadata.stdout.split('\x1f');
+  const fields = changed.stdout.split('\0').filter(Boolean);
+  const files: Array<{ path: string; originalPath?: string; status: string }> = [];
+  for (let index = 0; index < fields.length;) {
+    const status = fields[index++];
+    if (status.startsWith('R') || status.startsWith('C')) {
+      const originalPath = fields[index++];
+      const filePath = fields[index++];
+      if (originalPath && filePath) files.push({ path: filePath, originalPath, status });
+    } else {
+      const filePath = fields[index++];
+      if (filePath) files.push({ path: filePath, status });
+    }
+  }
+  return { ok: true, commit: { id, shortId, author, authorEmail, committer, committerEmail, date, parents: parents ? parents.split(' ').filter(Boolean) : [], message: message.join('\x1f').trim() }, files };
+}
+
+async function getCommitDiff(candidate: unknown, commitCandidate: unknown, fileCandidate: unknown) {
+  const repository = await resolveRepository(candidate);
+  if (!repository.ok) return { ok: false, error: repository.error };
+  const commit = await resolveCommit(repository.path, commitCandidate);
+  if (!commit.ok) return { ok: false, error: commit.error };
+  const files = [fileCandidate];
+  if (!validPaths(files)) return { ok: false, error: 'Choose a valid file from this commit.' };
+  const result = await git(['show', '--first-parent', '--format=', '--no-ext-diff', '--unified=3', commit.id, '--', files[0]], repository.path);
+  return result.ok ? { ok: true, patch: result.stdout } : { ok: false, error: cleanGitError(result.stderr) };
 }
 
 async function getBranches(candidate: unknown) {
