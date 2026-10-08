@@ -14,6 +14,9 @@ declare global {
       getCommitDiff: (repoPath: string, commitId: string, filePath: string) => Promise<unknown>;
       getBranches: (repoPath: string) => Promise<unknown>;
       getMergePreview: (repoPath: string, source: string) => Promise<unknown>;
+      getGitHubStatus: (repoPath: string) => Promise<unknown>;
+      connectGitHub: (token: string) => Promise<unknown>;
+      disconnectGitHub: () => Promise<unknown>;
       getDiff: (repoPath: string, options: unknown) => Promise<unknown>;
       getOperations: (repoPath: string) => Promise<unknown>;
       operateGit: (repoPath: string, operation: unknown) => Promise<{ ok: boolean; stdout?: string; stderr?: string }>;

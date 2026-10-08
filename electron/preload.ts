@@ -12,6 +12,9 @@ contextBridge.exposeInMainWorld('branchline', {
   getCommitDiff: (repoPath: string, commitId: string, filePath: string) => ipcRenderer.invoke('repo:commit-diff', repoPath, commitId, filePath),
   getBranches: (repoPath: string) => ipcRenderer.invoke('repo:branches', repoPath),
   getMergePreview: (repoPath: string, source: string) => ipcRenderer.invoke('repo:merge-preview', repoPath, source),
+  getGitHubStatus: (repoPath: string) => ipcRenderer.invoke('github:status', repoPath),
+  connectGitHub: (token: string) => ipcRenderer.invoke('github:connect', token),
+  disconnectGitHub: () => ipcRenderer.invoke('github:disconnect'),
   getDiff: (repoPath: string, options: unknown) => ipcRenderer.invoke('repo:diff', repoPath, options),
   getOperations: (repoPath: string) => ipcRenderer.invoke('repo:operations', repoPath),
   operateGit: (repoPath: string, operation: unknown) => ipcRenderer.invoke('git:operate', repoPath, operation)

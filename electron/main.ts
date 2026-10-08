@@ -1,8 +1,9 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell } from 'electron';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
+import https from 'node:https';
 
 const execFileAsync = promisify(execFile);
 
@@ -101,6 +102,79 @@ async function gitWithInput(args: string[], cwd: string, input: string) {
   });
 }
 
+function githubTokenFile() { return path.join(app.getPath('userData'), 'github-token.bin'); }
+function githubProfileFile() { return path.join(app.getPath('userData'), 'github-profile.json'); }
+
+async function readGitHubToken() {
+  if (!safeStorage.isEncryptionAvailable()) return { ok: false as const, error: 'Secure credential storage is unavailable on this device.' };
+  try { return { ok: true as const, token: safeStorage.decryptString(await fs.readFile(githubTokenFile())) }; }
+  catch { return { ok: true as const, token: null as string | null }; }
+}
+
+async function readGitHubProfile() {
+  try {
+    const profile = JSON.parse(await fs.readFile(githubProfileFile(), 'utf8')) as { login?: unknown; name?: unknown; avatarUrl?: unknown; htmlUrl?: unknown; connectedAt?: unknown };
+    return typeof profile.login === 'string' ? { login: profile.login, name: typeof profile.name === 'string' ? profile.name : null, avatarUrl: typeof profile.avatarUrl === 'string' ? profile.avatarUrl : null, htmlUrl: typeof profile.htmlUrl === 'string' ? profile.htmlUrl : null, connectedAt: typeof profile.connectedAt === 'string' ? profile.connectedAt : null } : null;
+  } catch { return null; }
+}
+
+function githubRequest(pathname: string, token: string) {
+  return new Promise<{ ok: boolean; status: number; body: unknown }>((resolve) => {
+    const request = https.request({ hostname: 'api.github.com', path: pathname, method: 'GET', headers: { Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}`, 'User-Agent': 'Gitwise', 'X-GitHub-Api-Version': '2026-03-10' } }, (response) => {
+      let raw = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => { raw += chunk; });
+      response.on('end', () => { let body: unknown = null; try { body = raw ? JSON.parse(raw) : null; } catch { body = null; } resolve({ ok: Boolean(response.statusCode && response.statusCode >= 200 && response.statusCode < 300), status: response.statusCode || 0, body }); });
+    });
+    request.on('error', () => resolve({ ok: false, status: 0, body: null }));
+    request.end();
+  });
+}
+
+function parseGitHubRemote(value: string) {
+  const match = value.trim().match(/^(?:git@github\.com:|https?:\/\/github\.com\/|ssh:\/\/git@github\.com\/)([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i);
+  return match ? { host: 'github.com', owner: match[1], name: match[2], url: value.trim() } : null;
+}
+
+async function getGitHubRemote(repositoryPath: string) {
+  const remotes = await git(['remote'], repositoryPath);
+  if (!remotes.ok) return null;
+  for (const remote of remotes.stdout.split(/\r?\n/).filter(Boolean)) {
+    const url = await git(['remote', 'get-url', remote], repositoryPath);
+    const parsed = url.ok ? parseGitHubRemote(url.stdout) : null;
+    if (parsed) return { remote, ...parsed };
+  }
+  return null;
+}
+
+async function getGitHubStatus(candidate: unknown) {
+  const repository = await resolveRepository(candidate);
+  if (!repository.ok) return { ok: false, error: repository.error, connected: false, account: null, remote: null };
+  const [token, profile, remote] = await Promise.all([readGitHubToken(), readGitHubProfile(), getGitHubRemote(repository.path)]);
+  return { ok: true, connected: token.ok && Boolean(token.token), secureStorageAvailable: safeStorage.isEncryptionAvailable(), account: profile, remote, error: token.ok ? null : token.error };
+}
+
+async function connectGitHub(candidate: unknown) {
+  if (typeof candidate !== 'string' || candidate.length < 20 || candidate.length > 300 || /\s/.test(candidate)) return { ok: false, error: 'Paste a valid GitHub personal access token.' };
+  if (!safeStorage.isEncryptionAvailable()) return { ok: false, error: 'Secure credential storage is unavailable on this device.' };
+  const response = await githubRequest('/user', candidate);
+  const user = response.body as { login?: unknown; name?: unknown; avatar_url?: unknown; html_url?: unknown } | null;
+  if (!response.ok || !user || typeof user.login !== 'string') {
+    const error = response.status === 401 ? 'GitHub rejected that token. Check that it is valid and has not expired.' : response.status === 403 ? 'GitHub denied this request. Check token permissions or try again later.' : response.status === 0 ? 'GitHub could not be reached. Check your network connection and try again.' : 'GitHub could not verify that token.';
+    return { ok: false, error };
+  }
+  await fs.mkdir(path.dirname(githubTokenFile()), { recursive: true });
+  await fs.writeFile(githubTokenFile(), safeStorage.encryptString(candidate));
+  const profile = { login: user.login, name: typeof user.name === 'string' ? user.name : null, avatarUrl: typeof user.avatar_url === 'string' ? user.avatar_url : null, htmlUrl: typeof user.html_url === 'string' ? user.html_url : null, connectedAt: new Date().toISOString() };
+  await fs.writeFile(githubProfileFile(), JSON.stringify(profile), 'utf8');
+  return { ok: true, account: profile };
+}
+
+async function disconnectGitHub() {
+  await Promise.all([fs.rm(githubTokenFile(), { force: true }), fs.rm(githubProfileFile(), { force: true })]);
+  return { ok: true };
+}
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1440,
@@ -135,6 +209,9 @@ app.whenReady().then(() => {
   ipcMain.handle('repo:commit-diff', (_, repoPath: unknown, commitId: unknown, filePath: unknown) => getCommitDiff(repoPath, commitId, filePath));
   ipcMain.handle('repo:branches', (_, repoPath: unknown) => getBranches(repoPath));
   ipcMain.handle('repo:merge-preview', (_, repoPath: unknown, source: unknown) => getMergePreview(repoPath, source));
+  ipcMain.handle('github:status', (_, repoPath: unknown) => getGitHubStatus(repoPath));
+  ipcMain.handle('github:connect', (_, token: unknown) => connectGitHub(token));
+  ipcMain.handle('github:disconnect', () => disconnectGitHub());
   ipcMain.handle('repo:diff', (_, repoPath: unknown, options?: { path?: string; staged?: boolean; base?: string; compare?: string }) => getDiff(repoPath, options));
   ipcMain.handle('repo:operations', (_, repoPath: unknown) => typeof repoPath === 'string' ? operationLog.filter((item) => item.repositoryPath === path.resolve(repoPath)) : []);
   ipcMain.handle('git:operate', (_, repoPath: unknown, operation: GitOperation) => operateGit(repoPath, operation));

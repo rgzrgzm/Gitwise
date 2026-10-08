@@ -24,10 +24,14 @@ npm run build
 - Review real staged, unstaged, and untracked files; stage or unstage whole files or individual text-diff hunks, discard with confirmation, create stashes, apply or restore a selected stash, and commit staged work.
 - Search local commit messages, load history in pages, and inspect commit metadata, changed files, and file diffs.
 
-GitHub authentication, pull requests, reviews, checks, and shared team activity are intentionally not connected yet. Those screens explicitly explain the unavailable integration instead of showing fabricated collaboration data.
+GitHub account linking is available from the Pull requests and Activity workspaces. Gitwise validates a fine-grained personal access token, stores it using Electron's platform credential protection, and detects a matching github.com remote. Pull requests, reviews, checks, and shared team activity are not loaded yet; those screens state that limitation instead of showing fabricated collaboration data.
 
 ## Security model
 
 Electron uses `contextIsolation: true` and has Node integration disabled in the renderer. The preload bridge exposes only specific, validated repository queries and named Git operations. Git is run in Electron’s main process using argument arrays; no renderer-provided shell command is executed.
 
-Git transport credentials remain managed by your existing Git credential helper or SSH agent. Gitwise does not store GitHub or transport credentials.
+Git transport credentials remain managed by your existing Git credential helper or SSH agent. Gitwise stores a GitHub API token only after it is validated, using Electron's encrypted platform credential storage; it does not expose that token to renderer storage or operation logs.
+
+## Connect GitHub
+
+Create a fine-grained personal access token in GitHub **Settings → Developer settings → Personal access tokens**, then open **Pull requests** or **Activity** in Gitwise and connect it there. The token is verified against your GitHub account before Gitwise saves it. For the upcoming repository collaboration features, limit the token to the repositories you intend to use and grant only the read permissions GitHub requires for the data you choose to load.

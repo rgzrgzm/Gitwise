@@ -12,6 +12,7 @@ type CommitFileDiff = { commitId: string; path: string; patch: string; error?: s
 type Stash = { id: string; selector: string; subject: string; author: string; date: string };
 type DiffHunk = { index: number; header: string; body: string };
 type MergePreview = { ok: boolean; error?: string; source?: string; target?: string; relationship?: 'already-merged' | 'fast-forward' | 'merge-commit'; conflictPreview?: 'clean' | 'conflicts' | 'unavailable'; workingTreeDirty?: boolean; commits?: Commit[]; files?: Array<{ path: string; additions: number | null; deletions: number | null; binary: boolean }>; additions?: number; deletions?: number };
+type GitHubConnection = { ok: boolean; error?: string | null; connected: boolean; secureStorageAvailable?: boolean; account?: { login: string; name: string | null; avatarUrl: string | null; htmlUrl: string | null; connectedAt: string | null } | null; remote?: { remote: string; host: string; owner: string; name: string; url: string } | null };
 type Branch = { name: string; fullName: string; upstream: string | null; current: boolean; remote: boolean; shortId: string; date: string; author: string; subject: string };
 type OperationRecord = { id: string; label: string; ok: boolean; at: string; detail: string };
 const HISTORY_PAGE_SIZE = 30;
@@ -54,6 +55,9 @@ export default function GitwiseApp() {
   const [operations, setOperations] = useState<OperationRecord[]>([]);
   const [stashes, setStashes] = useState<Stash[]>([]);
   const [stashError, setStashError] = useState('');
+  const [github, setGitHub] = useState<GitHubConnection | null>(null);
+  const [githubToken, setGitHubToken] = useState('');
+  const [githubBusy, setGitHubBusy] = useState(false);
   const [notice, setNotice] = useState('Demo mode · open a local repository to refresh live status');
   const [busy, setBusy] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<FileState | null>(null);
@@ -79,23 +83,24 @@ export default function GitwiseApp() {
   const localBranches = branches.filter((branch) => !branch.remote);
 
   const refresh = async (path = repoPath) => {
-    if (!path) { historyRequest.current += 1; setSnapshot(null); setHistory([]); setHistoryHasMore(false); setHistoryError(''); setBranches([]); setStashes([]); setStashError(''); setNotice('Demo mode · open a local repository to refresh live status'); return; }
+    if (!path) { historyRequest.current += 1; setSnapshot(null); setHistory([]); setHistoryHasMore(false); setHistoryError(''); setBranches([]); setStashes([]); setStashError(''); setGitHub(null); setNotice('Demo mode · open a local repository to refresh live status'); return; }
     const nextHistorySearch = path === repoPath ? historySearch : '';
     if (path !== repoPath) { setHistorySearch(''); setHistorySearchDraft(''); setSelectedCommit(null); setCommitDetails(null); setCommitDetailsLoading(false); setCommitFileDiff(null); commitRequest.current += 1; commitFileRequest.current += 1; }
     setBusy('Refreshing repository');
     setHistoryLoading(false);
     const requestId = ++historyRequest.current;
-    const [repoResult, historyResult, branchesResult, operationResult, stashResult] = await Promise.all([
+    const [repoResult, historyResult, branchesResult, operationResult, stashResult, githubResult] = await Promise.all([
       window.branchline?.inspectRepository(path) as Promise<Snapshot>,
       window.branchline?.getHistory(path, HISTORY_PAGE_SIZE, 0, nextHistorySearch) as Promise<{ ok: boolean; commits?: Commit[]; error?: string; hasMore?: boolean }>,
       window.branchline?.getBranches(path) as Promise<{ ok: boolean; branches?: Branch[]; error?: string }>,
       window.branchline?.getOperations(path) as Promise<OperationRecord[]>,
-      window.branchline?.getStashes(path) as Promise<{ ok: boolean; stashes?: Stash[]; error?: string }>
+      window.branchline?.getStashes(path) as Promise<{ ok: boolean; stashes?: Stash[]; error?: string }>,
+      window.branchline?.getGitHubStatus(path) as Promise<GitHubConnection>
     ]);
     setBusy(null);
     if (!repoResult?.ok) { setSnapshot(null); setNotice(repoResult?.error || 'Unable to inspect this repository.'); return; }
     const resolved = repoResult.repositoryPath || path;
-    setRepoPath(resolved); setSnapshot(repoResult); setBranches(branchesResult?.branches || []); setOperations(operationResult || []); setStashes(stashResult?.stashes || []); setStashError(stashResult?.ok ? '' : stashResult?.error || 'Unable to load saved stashes.');
+    setRepoPath(resolved); setSnapshot(repoResult); setBranches(branchesResult?.branches || []); setOperations(operationResult || []); setStashes(stashResult?.stashes || []); setStashError(stashResult?.ok ? '' : stashResult?.error || 'Unable to load saved stashes.'); setGitHub(githubResult || null);
     if (requestId === historyRequest.current) { setHistory(historyResult?.commits || []); setHistoryHasMore(Boolean(historyResult?.hasMore)); setHistoryError(historyResult?.ok ? '' : historyResult?.error || 'Unable to load local history.'); }
     setNotice(`Local status · ${repoResult.name || 'repository'} checked ${relativeTime(repoResult.checkedAt || new Date().toISOString())}`);
   };
@@ -146,6 +151,25 @@ export default function GitwiseApp() {
     if (!mergePreview?.ok || !mergePreview.source) return;
     const source = mergePreview.source;
     if (await operate({ type: 'merge', source }, `Merge ${source}`)) setMergePreview(null);
+  };
+
+  const connectGitHub = async () => {
+    const token = githubToken.trim();
+    if (!token) return;
+    setGitHubBusy(true);
+    let result: { ok: boolean; error?: string } | undefined;
+    try { result = await window.branchline?.connectGitHub(token) as { ok: boolean; error?: string } | undefined; }
+    catch (error) { result = { ok: false, error: error instanceof Error ? error.message : 'GitHub could not be connected.' }; }
+    finally { setGitHubBusy(false); }
+    if (!result?.ok) { setGitHub((current) => ({ ok: true, connected: false, account: current?.account || null, remote: current?.remote || null, error: result?.error || 'GitHub could not be connected.' })); return; }
+    setGitHubToken(''); await refresh(repoPath);
+  };
+
+  const disconnectGitHub = async () => {
+    setGitHubBusy(true);
+    try { await window.branchline?.disconnectGitHub(); }
+    finally { setGitHubBusy(false); }
+    await refresh(repoPath);
   };
 
   const loadComparison = async () => {
@@ -235,8 +259,8 @@ export default function GitwiseApp() {
         {view === 'Changes' && <ChangesSafe connected={connected} onOpen={chooseRepository} confirm={confirm} staged={staged} unstaged={unstaged} untracked={untracked} stashes={stashes} stashError={stashError} identity={snapshot?.identity} selected={selectedFile} diff={diff} commitMessage={commitMessage} setCommitMessage={setCommitMessage} openFile={openFile} applyHunk={applyHunk} operate={operate} />}
         {view === 'Branches' && <Branches connected={connected} onOpen={chooseRepository} confirm={confirm} previewMerge={previewMerge} branches={branches} draft={branchDraft} setDraft={setBranchDraft} selected={selectedBranch} setSelected={setSelectedBranch} operate={operate} />}
         {view === 'Compare' && <Compare connected={connected} onOpen={chooseRepository} confirm={confirm} previewMerge={previewMerge} branches={branchOptions} base={compareBase} head={compareHead} setBase={setCompareBase} setHead={setCompareHead} diff={compareDiff} summary={compareSummary} load={loadComparison} operate={operate} />}
-        {view === 'Pull requests' && <ConnectionState title="Pull requests need GitHub" detail="Gitwise has local Git access only. Connect a GitHub account in a future collaboration milestone to load pull requests, reviews, and checks." />}
-        {view === 'Activity' && <ConnectionState title="Shared activity needs GitHub" detail="Gitwise cannot see teammates’ local or unpushed work. Connect GitHub to load pushed commits, reviews, merges, and workflow checks." />}
+        {view === 'Pull requests' && <GitHubConnectionView connected={connected} onOpen={chooseRepository} github={github} token={githubToken} setToken={setGitHubToken} busy={githubBusy} connect={connectGitHub} disconnect={disconnectGitHub} title="Pull requests" detail="Connect GitHub before Gitwise can load pull requests, reviews, and checks for this repository." />}
+        {view === 'Activity' && <GitHubConnectionView connected={connected} onOpen={chooseRepository} github={github} token={githubToken} setToken={setGitHubToken} busy={githubBusy} connect={connectGitHub} disconnect={disconnectGitHub} title="Shared activity" detail="Connect GitHub before Gitwise can load pushed commits, reviews, and checks from this repository." />}
         {connected && operations.length > 0 && <Operations records={operations} />}
       </div>
       {confirmation && <ConfirmDialog title={confirmation.title} detail={confirmation.detail} confirmLabel={confirmation.confirmLabel} onCancel={() => setConfirmation(null)} onConfirm={() => { confirmation.action(); setConfirmation(null); }} />}
@@ -288,6 +312,12 @@ function Branches({ connected, onOpen, confirm, previewMerge, branches, draft, s
   return <div className="page"><div className="page-title"><div><span className="eyebrow">Repository map</span><h1>Branches</h1><p>Local and remote branches are kept distinct. Every change explains its local or remote effect.</p></div></div><div className="branch-create"><input value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="new branch name" /><select value={startPoint} onChange={(event) => setStartPoint(event.target.value)} aria-label="Starting point"><option value="">Current branch</option>{local.map((branch) => <option key={branch.name} value={branch.name}>{branch.name}</option>)}</select><button className="primary-button" disabled={!draft.trim()} onClick={() => void create()}><Plus size={16} />Create branch</button></div><div className="branch-search"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filter branches" /></div><div className="branches-layout"><section className="panel branch-list-panel">{render('Local branches', local)}{render('Remote branches', remote)}</section><aside className="panel branch-detail">{selected ? <><span className="eyebrow">{selected.remote ? 'Remote branch' : 'Local branch'}</span><h2>{selected.name}</h2><p>{selected.remote ? `Remote reference on ${remoteName || 'unknown remote'}. Deleting it will push a deletion to that remote.` : selected.upstream ? `Tracks ${selected.upstream}` : 'No upstream configured. Publish it from the header to create one.'}</p>{!selected.remote && !selected.current && <button className="primary-button" onClick={() => void operate({ type: 'switch-branch', name: selected.name }, 'Switch branch')}>Switch here</button>}{!selected.remote && !selected.current && <button className="ghost-button" onClick={() => previewMerge(selected.name)}>Preview local merge</button>}{!selected.remote && <div className="rename-row"><input value={renameTo} onChange={(event) => setRenameTo(event.target.value)} aria-label="New branch name" /><button className="ghost-button compact" disabled={!renameTo.trim() || renameTo.trim() === selected.name} onClick={() => confirm(`Rename ${selected.name}?`, `Only the local branch will be renamed. Its remote branch, if any, is unchanged.`, 'Rename local branch', () => void operate({ type: 'rename-branch', oldName: selected.name, newName: renameTo.trim() }, 'Rename branch'))}>Rename</button></div>}{!selected.remote && !selected.current && <button className="danger-outline" onClick={() => confirm(`Delete local branch ${selected.name}?`, 'This removes only the local branch. Any matching remote branch will remain available.', 'Delete local branch', () => void operate({ type: 'delete-local-branch', name: selected.name }, 'Delete local branch'))}>Delete local branch</button>}{selected.remote && remoteName && remoteBranch && <button className="danger-outline" onClick={() => confirm(`Delete ${selected.name} from ${remoteName}?`, 'This will push a branch deletion to the remote. It does not delete a local branch with the same name.', 'Delete remote branch', () => void operate({ type: 'delete-remote-branch', remote: remoteName, name: remoteBranch }, 'Delete remote branch'))}>Delete remote branch</button>}</> : <div className="saved-empty">Select a branch to see its available actions.</div>}</aside></div></div>;
 }
 function Compare({ connected, onOpen, confirm, previewMerge, branches, base, head, setBase, setHead, diff, summary, load, operate }: { connected: boolean; onOpen: () => void; confirm: (title: string, detail: string, confirmLabel: string, action: () => void) => void; previewMerge: (source: string) => void; branches: string[]; base: string; head: string; setBase: (value: string) => void; setHead: (value: string) => void; diff: string; summary: { files: number; additions: number; deletions: number } | null; load: () => void; operate: (operation: unknown, label: string) => Promise<boolean> }) { if (!connected) return <Empty onOpen={onOpen} />; return <div className="page"><div className="page-title"><div><span className="eyebrow">Compare branches</span><h1>What would change?</h1><p>The comparison uses the shared merge base: changes introduced by the comparison branch since it diverged from base.</p></div></div><div className="compare-controls"><label>Base<select value={base} onChange={(event) => setBase(event.target.value)}><option value="">Choose base</option>{branches.map((branch) => <option key={branch}>{branch}</option>)}</select></label><label>Comparison<select value={head} onChange={(event) => setHead(event.target.value)}><option value="">Choose comparison</option>{branches.map((branch) => <option key={branch}>{branch}</option>)}</select></label><button className="primary-button" disabled={!base || !head || base === head} onClick={load}>Compare</button>{head && <button className="ghost-button" onClick={() => previewMerge(head)}>Preview merge into current</button>}</div>{summary && <div className="compare-summary"><span>{summary.files} changed file{summary.files === 1 ? '' : 's'}</span><span className="addition">+{summary.additions} additions</span><span className="deletion">−{summary.deletions} deletions</span></div>}<section className="panel diff-panel"><pre className="real-diff">{diff || 'Choose two branches to see their actual diff.'}</pre></section></div>; }
+function GitHubConnectionView({ connected, onOpen, github, token, setToken, busy, connect, disconnect, title, detail }: { connected: boolean; onOpen: () => void; github: GitHubConnection | null; token: string; setToken: (value: string) => void; busy: boolean; connect: () => void; disconnect: () => void; title: string; detail: string }) {
+  if (!connected) return <Empty onOpen={onOpen} />;
+  const remote = github?.remote;
+  if (!github?.connected) return <div className="page empty-home"><div className="empty-hero github-connect"><div className="empty-mark"><CloudOff size={28} /></div><span className="eyebrow">GitHub not connected</span><h1>{title}</h1><p>{detail}</p>{remote ? <div className="github-remote"><strong>{remote.owner}/{remote.name}</strong><span>Detected from {remote.remote}</span></div> : <div className="github-remote"><strong>No GitHub remote detected</strong><span>Local Git remains available. Add a github.com remote to connect repository collaboration later.</span></div>}{github?.secureStorageAvailable === false ? <p className="connection-error">Secure credential storage is unavailable on this device.</p> : <form className="github-token-form" onSubmit={(event) => { event.preventDefault(); connect(); }}><label htmlFor="github-token">Fine-grained personal access token</label><input id="github-token" type="password" value={token} onChange={(event) => setToken(event.target.value)} autoComplete="off" spellCheck={false} placeholder="github_pat_…" /><small>Your token is verified once, encrypted by Windows credential protection, and never exposed in Gitwise’s renderer storage.</small>{github?.error && <p className="connection-error" role="alert">{github.error}</p>}<button className="primary-button" disabled={!token.trim() || busy} type="submit">{busy ? 'Connecting…' : 'Connect GitHub'}</button></form>}</div></div>;
+  return <div className="page"><div className="page-heading"><div><span className="eyebrow">GitHub connected</span><h1>{title}</h1><p>{detail}</p></div></div><section className="panel github-status-panel"><div className="github-account"><div className="repo-avatar">{github.account?.avatarUrl ? <img src={github.account.avatarUrl} alt="" /> : <Code2 size={16} />}</div><div><strong>{github.account?.name || github.account?.login}</strong><span>@{github.account?.login}</span></div></div><div className="github-status-detail"><span>Repository</span><strong>{remote ? `${remote.owner}/${remote.name}` : 'No GitHub remote detected'}</strong><small>{remote ? `Remote: ${remote.remote}` : 'Connect a github.com remote to link this repository.'}</small></div><div className="github-not-ready"><CloudOff size={18} /><div><strong>GitHub account is connected</strong><p>Pull request, review, check, and activity loading will be added in the next collaboration task.</p></div></div><button className="danger-outline" disabled={busy} onClick={() => void disconnect()}>{busy ? 'Disconnecting…' : 'Disconnect GitHub'}</button></section></div>;
+}
 function ConnectionState({ title, detail }: { title: string; detail: string }) { return <div className="page empty-home"><div className="empty-hero"><div className="empty-mark"><CloudOff size={28} /></div><span className="eyebrow">Not connected</span><h1>{title}</h1><p>{detail}</p></div></div>; }
 function Operations({ records }: { records: OperationRecord[] }) { return <section className="panel operations-panel"><div className="panel-heading"><div><h2>Recent local operations</h2><p>Technical detail is sanitized before it is shown here.</p></div></div>{records.slice(0, 5).map((record) => <div className="operation-row" key={record.id}><span className={record.ok ? 'status-dot green' : 'status-dot danger'} /><div><strong>{record.label}</strong><span>{relativeTime(record.at)} · {record.ok ? 'Completed' : 'Needs attention'}</span></div><code>{record.detail || 'No output'}</code></div>)}</section>; }
 function ConfirmDialog({ title, detail, confirmLabel, onCancel, onConfirm }: { title: string; detail: string; confirmLabel: string; onCancel: () => void; onConfirm: () => void }) { return <div className="confirm-overlay" role="dialog" aria-modal="true" aria-labelledby="confirm-title"><section className="confirm-dialog"><span className="eyebrow">Confirm action</span><h2 id="confirm-title">{title}</h2><p>{detail}</p><div><button className="ghost-button" onClick={onCancel}>Cancel</button><button className="danger-outline" onClick={onConfirm}>{confirmLabel}</button></div></section></div>; }
