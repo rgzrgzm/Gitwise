@@ -13,6 +13,7 @@ declare global {
       getCommitDetails: (repoPath: string, commitId: string) => Promise<unknown>;
       getCommitDiff: (repoPath: string, commitId: string, filePath: string) => Promise<unknown>;
       getBranches: (repoPath: string) => Promise<unknown>;
+      getMergePreview: (repoPath: string, source: string) => Promise<unknown>;
       getDiff: (repoPath: string, options: unknown) => Promise<unknown>;
       getOperations: (repoPath: string) => Promise<unknown>;
       operateGit: (repoPath: string, operation: unknown) => Promise<{ ok: boolean; stdout?: string; stderr?: string }>;

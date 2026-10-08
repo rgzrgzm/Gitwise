@@ -134,6 +134,7 @@ app.whenReady().then(() => {
   ipcMain.handle('repo:commit-details', (_, repoPath: unknown, commitId: unknown) => getCommitDetails(repoPath, commitId));
   ipcMain.handle('repo:commit-diff', (_, repoPath: unknown, commitId: unknown, filePath: unknown) => getCommitDiff(repoPath, commitId, filePath));
   ipcMain.handle('repo:branches', (_, repoPath: unknown) => getBranches(repoPath));
+  ipcMain.handle('repo:merge-preview', (_, repoPath: unknown, source: unknown) => getMergePreview(repoPath, source));
   ipcMain.handle('repo:diff', (_, repoPath: unknown, options?: { path?: string; staged?: boolean; base?: string; compare?: string }) => getDiff(repoPath, options));
   ipcMain.handle('repo:operations', (_, repoPath: unknown) => typeof repoPath === 'string' ? operationLog.filter((item) => item.repositoryPath === path.resolve(repoPath)) : []);
   ipcMain.handle('git:operate', (_, repoPath: unknown, operation: GitOperation) => operateGit(repoPath, operation));
@@ -255,7 +256,16 @@ async function operateGit(candidate: unknown, operation: unknown) {
       case 'rename-branch': if (!validRef(request.oldName) || !validRef(request.newName)) return { ok: false, stdout: '', stderr: 'Use valid branch names.' }; args = ['branch', '-m', request.oldName, request.newName]; break;
       case 'delete-local-branch': if (!validRef(request.name) || request.name === snapshot.branch) return { ok: false, stdout: '', stderr: 'Switch branches before deleting this branch.' }; args = ['branch', request.force ? '-D' : '-d', request.name]; break;
       case 'delete-remote-branch': if (!validRef(request.remote) || !validRef(request.name)) return { ok: false, stdout: '', stderr: 'Choose a valid remote branch.' }; args = ['push', request.remote, '--delete', request.name]; break;
-      case 'merge': if (!validRef(request.source)) return { ok: false, stdout: '', stderr: 'Choose a valid source branch.' }; args = ['merge', '--no-edit', request.source]; break;
+      case 'merge': {
+        if (!validRef(request.source)) return { ok: false, stdout: '', stderr: 'Choose a valid source branch.' };
+        if (snapshot.files.length) return { ok: false, stdout: '', stderr: 'Commit, stash, or discard local changes before merging. Gitwise keeps unfinished work separate from a merge.' };
+        const preview = await getMergePreview(repository.path, request.source);
+        if (!preview.ok) return { ok: false, stdout: '', stderr: preview.error };
+        if (preview.workingTreeDirty) return { ok: false, stdout: '', stderr: 'Local changes appeared while preparing the merge. Commit, stash, or discard them, then preview again.' };
+        if (preview.relationship === 'already-merged') return { ok: false, stdout: '', stderr: `${request.source} is already included in ${preview.target}.` };
+        args = ['merge', '--no-edit', request.source];
+        break;
+      }
       case 'merge-continue': args = ['merge', '--continue']; break;
       case 'merge-abort': args = ['merge', '--abort']; break;
       case 'continue-operation':
@@ -365,6 +375,39 @@ async function getBranches(candidate: unknown) {
   const result = await git(['for-each-ref', `--format=${format}`, 'refs/heads', 'refs/remotes'], repository.path);
   if (!result.ok) return { ok: false, error: result.stderr };
   return { ok: true, branches: result.stdout.split(/\r?\n/).filter(Boolean).filter((line) => !line.includes('/HEAD\x1f')).map((line) => { const [name, fullName, upstream, head, shortId, date, author, subject] = line.split('\x1f'); return { name, fullName, upstream: upstream || null, current: head === '*', remote: fullName.startsWith('refs/remotes/'), shortId, date, author, subject }; }) };
+}
+
+async function getMergePreview(candidate: unknown, sourceCandidate: unknown) {
+  const repository = await resolveRepository(candidate);
+  if (!repository.ok) return { ok: false, error: repository.error };
+  if (!validRef(sourceCandidate)) return { ok: false, error: 'Choose a valid source branch.' };
+  const source = sourceCandidate as string;
+  const [targetResult, sourceResult, statusResult] = await Promise.all([
+    git(['branch', '--show-current'], repository.path),
+    git(['rev-parse', '--verify', `${source}^{commit}`], repository.path),
+    git(['status', '--porcelain=v1'], repository.path)
+  ]);
+  const target = targetResult.stdout.trim();
+  if (!target) return { ok: false, error: 'Switch to a local branch before previewing a merge.' };
+  if (!sourceResult.ok) return { ok: false, error: 'That source branch is no longer available in this repository.' };
+  if (source === target) return { ok: true, source, target, relationship: 'already-merged', conflictPreview: 'clean', workingTreeDirty: Boolean(statusResult.stdout.trim()), commits: [], files: [], additions: 0, deletions: 0 };
+  const [sourceAlreadyIncluded, targetAlreadyIncluded, commitResult, numstatResult] = await Promise.all([
+    git(['merge-base', '--is-ancestor', source, 'HEAD'], repository.path),
+    git(['merge-base', '--is-ancestor', 'HEAD', source], repository.path),
+    git(['log', '--max-count=50', '--date=iso-strict', '--decorate=short', '--format=%H%x1f%h%x1f%an%x1f%ae%x1f%ad%x1f%D%x1f%s', `HEAD..${source}`], repository.path),
+    git(['diff', '--numstat', 'HEAD...'+source], repository.path)
+  ]);
+  if (!commitResult.ok || !numstatResult.ok) return { ok: false, error: cleanGitError(commitResult.stderr || numstatResult.stderr) || 'Unable to compare these branches.' };
+  const relationship = sourceAlreadyIncluded.ok ? 'already-merged' : targetAlreadyIncluded.ok ? 'fast-forward' : 'merge-commit';
+  let conflictPreview: 'clean' | 'conflicts' | 'unavailable' = 'clean';
+  if (relationship !== 'already-merged') {
+    const tree = await git(['merge-tree', '--write-tree', 'HEAD', source], repository.path);
+    if (!tree.ok) conflictPreview = /unknown option|usage:|not a valid object/i.test(tree.stderr) ? 'unavailable' : 'conflicts';
+  }
+  const commits = commitResult.stdout.split(/\r?\n/).filter(Boolean).map((line) => { const [id, shortId, author, email, date, refs, subject] = line.split('\x1f'); return { id, shortId, author, email, date, refs: refs ? refs.split(', ').filter(Boolean) : [], subject }; });
+  let additions = 0; let deletions = 0;
+  const files = numstatResult.stdout.split(/\r?\n/).filter(Boolean).map((line) => { const [added, deleted, ...pathParts] = line.split('\t'); const binary = added === '-' || deleted === '-'; const filePath = pathParts.join('\t'); if (!binary) { additions += Number(added) || 0; deletions += Number(deleted) || 0; } return { path: filePath, additions: binary ? null : Number(added) || 0, deletions: binary ? null : Number(deleted) || 0, binary }; }).filter((file) => file.path);
+  return { ok: true, source, target, relationship, conflictPreview, workingTreeDirty: Boolean(statusResult.stdout.trim()), commits, files, additions, deletions };
 }
 
 async function getDiff(candidate: unknown, options: { path?: string; staged?: boolean; base?: string; compare?: string } = {}) {

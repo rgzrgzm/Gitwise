@@ -20,7 +20,7 @@ npm run build
 - Open and persist validated local Git repositories.
 - Inspect the current branch, upstream relationship, remotes, author identity, working-tree state, and freshness.
 - Fetch, fast-forward pull, push, and publish a local branch.
-- Browse actual local and remote branches, create/switch/delete local branches, merge a selected branch, and compare two local branches.
+- Browse actual local and remote branches, create/switch/delete local branches, preview incoming commits, files, and predicted conflicts before a local merge, and compare two local branches.
 - Review real staged, unstaged, and untracked files; stage or unstage whole files or individual text-diff hunks, discard with confirmation, create stashes, apply or restore a selected stash, and commit staged work.
 - Search local commit messages, load history in pages, and inspect commit metadata, changed files, and file diffs.
 

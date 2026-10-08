@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('branchline', {
   getCommitDetails: (repoPath: string, commitId: string) => ipcRenderer.invoke('repo:commit-details', repoPath, commitId),
   getCommitDiff: (repoPath: string, commitId: string, filePath: string) => ipcRenderer.invoke('repo:commit-diff', repoPath, commitId, filePath),
   getBranches: (repoPath: string) => ipcRenderer.invoke('repo:branches', repoPath),
+  getMergePreview: (repoPath: string, source: string) => ipcRenderer.invoke('repo:merge-preview', repoPath, source),
   getDiff: (repoPath: string, options: unknown) => ipcRenderer.invoke('repo:diff', repoPath, options),
   getOperations: (repoPath: string) => ipcRenderer.invoke('repo:operations', repoPath),
   operateGit: (repoPath: string, operation: unknown) => ipcRenderer.invoke('git:operate', repoPath, operation)
