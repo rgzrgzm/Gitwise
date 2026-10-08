@@ -84,6 +84,7 @@ function App() {
     const name = author || 'Unknown author';
     return { sha: sha || fullSha?.slice(0, 7) || 'unknown', message: messageParts.join('\x1f') || 'Commit', author: name, initials: name.split(/\s+/).map((part) => part[0]).join('').slice(0, 2).toUpperCase(), time: time || 'recently', branch: repoData.branch || branch };
   }) : commits;
+  const statusText = notice || (repoData ? `Live status · ${repoName} checked just now` : 'Demo mode · open a local repository to refresh live status');
 
   async function removeSavedRepository(path: string) {
     setSavedRepos(await window.branchline?.removeRepository(path) || []);
@@ -131,7 +132,7 @@ function App() {
         </header>
 
         <div className="content-scroll">
-          {notice && <div className={notice.includes('Demo') ? 'notice demo' : 'notice'}><div className="notice-icon"><Sparkles size={15} /></div><span>{notice}</span><button onClick={() => setNotice(null)} aria-label="Dismiss notification"><X size={15} /></button></div>}
+          <div className={statusText.includes('Demo') ? 'notice demo' : 'notice'}><div className="notice-icon"><Sparkles size={15} /></div><span>{statusText}</span><button onClick={() => setNotice(null)} aria-label="Dismiss notification"><X size={15} /></button></div>
           {view === 'Home' && (repoData ? <LiveHomeView repoName={repoName} branch={branch} setView={setView} runAction={runAction} selectedCommit={selectedCommit} setSelectedCommit={setSelectedCommit} repoData={repoData} commits={liveCommits} /> : <EmptyHomeView onOpen={chooseRepo} />)}
           {view === 'Changes' && <ChangesView files={repoData ? repoData.files.map((file) => ({ path: file.path, state: file.index !== ' ' ? file.index : file.worktree, note: 'Live from Git', tone: file.index === '?' || file.worktree === '?' ? 'green' : 'blue' })) : files} runAction={runAction} operate={operate} />}
           {view === 'Branches' && <BranchesView branch={branch} setBranch={setBranch} operate={operate} />}
