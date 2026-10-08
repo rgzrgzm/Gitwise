@@ -24,7 +24,9 @@ type GitOperation =
   | { type: 'delete-remote-branch'; remote: string; name: string }
   | { type: 'merge'; source: string }
   | { type: 'merge-continue' }
-  | { type: 'merge-abort' };
+  | { type: 'merge-abort' }
+  | { type: 'continue-operation' }
+  | { type: 'abort-operation' };
 
 const activeOperations = new Set<string>();
 const operationLog: Array<{ id: string; repositoryPath: string; label: string; ok: boolean; at: string; detail: string }> = [];
@@ -62,6 +64,8 @@ function validateOperation(value: unknown): GitOperation | null {
     case 'merge': return typeof operation.source === 'string' ? { type: 'merge', source: operation.source } : null;
     case 'merge-continue': return { type: 'merge-continue' };
     case 'merge-abort': return { type: 'merge-abort' };
+    case 'continue-operation': return { type: 'continue-operation' };
+    case 'abort-operation': return { type: 'abort-operation' };
     default: return null;
   }
 }
@@ -171,7 +175,7 @@ async function operateGit(candidate: unknown, operation: unknown) {
   try {
     const snapshot = await inspectRepository(repository.path);
     if (!snapshot.ok || !snapshot.identity || !snapshot.files) return { ok: false, stdout: '', stderr: snapshot.ok ? 'Unable to inspect this repository.' : snapshot.error };
-    if (snapshot.operation && !['merge-continue', 'merge-abort'].includes(request.type)) return { ok: false, stdout: '', stderr: `Finish or abort the active ${snapshot.operation} before starting another operation.` };
+    if (snapshot.operation && !['merge-continue', 'merge-abort', 'continue-operation', 'abort-operation'].includes(request.type)) return { ok: false, stdout: '', stderr: `Finish or abort the active ${snapshot.operation} before starting another operation.` };
     let args: string[];
     switch (request.type) {
       case 'fetch': args = ['fetch', '--all', '--prune']; break;
@@ -213,6 +217,12 @@ async function operateGit(candidate: unknown, operation: unknown) {
       case 'merge': if (!validRef(request.source)) return { ok: false, stdout: '', stderr: 'Choose a valid source branch.' }; args = ['merge', '--no-edit', request.source]; break;
       case 'merge-continue': args = ['merge', '--continue']; break;
       case 'merge-abort': args = ['merge', '--abort']; break;
+      case 'continue-operation':
+        if (!snapshot.operation) return { ok: false, stdout: '', stderr: 'There is no unfinished Git operation to continue.' };
+        args = snapshot.operation === 'merge' ? ['merge', '--continue'] : snapshot.operation === 'rebase' ? ['rebase', '--continue'] : snapshot.operation === 'cherry-pick' ? ['cherry-pick', '--continue'] : ['revert', '--continue']; break;
+      case 'abort-operation':
+        if (!snapshot.operation) return { ok: false, stdout: '', stderr: 'There is no unfinished Git operation to abort.' };
+        args = snapshot.operation === 'merge' ? ['merge', '--abort'] : snapshot.operation === 'rebase' ? ['rebase', '--abort'] : snapshot.operation === 'cherry-pick' ? ['cherry-pick', '--abort'] : ['revert', '--abort']; break;
     }
     const result = await git(args, repository.path);
     recordOperation(repository.path, request.type, result.ok, result.ok ? result.stdout : result.stderr);

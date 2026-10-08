@@ -7,6 +7,7 @@ type FileState = { path: string; originalPath?: string; index: string; worktree:
 type Snapshot = { ok: boolean; error?: string; repositoryPath?: string; name?: string; branch?: string | null; detached?: boolean; upstream?: string | null; remotes?: string[]; counts?: { ahead: number; behind: number }; files?: FileState[]; identity?: { name: string | null; email: string | null }; operation?: string | null; checkedAt?: string; log?: string };
 type Commit = { id: string; shortId: string; author: string; email: string; date: string; refs: string[]; subject: string };
 type Branch = { name: string; fullName: string; upstream: string | null; current: boolean; remote: boolean; shortId: string; date: string; author: string; subject: string };
+type OperationRecord = { id: string; label: string; ok: boolean; at: string; detail: string };
 
 const pages: Array<{ label: View; icon: typeof Home }> = [
   { label: 'Home', icon: Home }, { label: 'Changes', icon: FileCode2 }, { label: 'Branches', icon: GitBranch }, { label: 'Compare', icon: GitCompareArrows }, { label: 'Pull requests', icon: GitCompareArrows }, { label: 'Activity', icon: Activity }
@@ -25,6 +26,7 @@ export default function GitwiseApp() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [history, setHistory] = useState<Commit[]>([]);
   const [branches, setBranches] = useState<Branch[]>([]);
+  const [operations, setOperations] = useState<OperationRecord[]>([]);
   const [notice, setNotice] = useState('Demo mode · open a local repository to refresh live status');
   const [busy, setBusy] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<FileState | null>(null);
@@ -35,6 +37,7 @@ export default function GitwiseApp() {
   const [compareBase, setCompareBase] = useState('');
   const [compareHead, setCompareHead] = useState('');
   const [compareDiff, setCompareDiff] = useState('');
+  const [confirmation, setConfirmation] = useState<{ title: string; detail: string; confirmLabel: string; action: () => void } | null>(null);
 
   const connected = Boolean(snapshot?.ok && repoPath);
   const repoName = snapshot?.name || 'No repository selected';
@@ -48,15 +51,16 @@ export default function GitwiseApp() {
   const refresh = async (path = repoPath) => {
     if (!path) { setSnapshot(null); setHistory([]); setBranches([]); setNotice('Demo mode · open a local repository to refresh live status'); return; }
     setBusy('Refreshing repository');
-    const [repoResult, historyResult, branchesResult] = await Promise.all([
+    const [repoResult, historyResult, branchesResult, operationResult] = await Promise.all([
       window.branchline?.inspectRepository(path) as Promise<Snapshot>,
       window.branchline?.getHistory(path, 80, 0) as Promise<{ ok: boolean; commits?: Commit[]; error?: string }>,
-      window.branchline?.getBranches(path) as Promise<{ ok: boolean; branches?: Branch[]; error?: string }>
+      window.branchline?.getBranches(path) as Promise<{ ok: boolean; branches?: Branch[]; error?: string }>,
+      window.branchline?.getOperations(path) as Promise<OperationRecord[]>
     ]);
     setBusy(null);
     if (!repoResult?.ok) { setSnapshot(null); setNotice(repoResult?.error || 'Unable to inspect this repository.'); return; }
     const resolved = repoResult.repositoryPath || path;
-    setRepoPath(resolved); setSnapshot(repoResult); setHistory(historyResult?.commits || []); setBranches(branchesResult?.branches || []);
+    setRepoPath(resolved); setSnapshot(repoResult); setHistory(historyResult?.commits || []); setBranches(branchesResult?.branches || []); setOperations(operationResult || []);
     setNotice(`Local status · ${repoResult.name || 'repository'} checked ${relativeTime(repoResult.checkedAt || new Date().toISOString())}`);
   };
 
@@ -94,6 +98,7 @@ export default function GitwiseApp() {
   };
 
   const statusText = busy ? `${busy}…` : notice;
+  const confirm = (title: string, detail: string, confirmLabel: string, action: () => void) => setConfirmation({ title, detail, confirmLabel, action });
   const branchOptions = useMemo(() => localBranches.map((branch) => branch.name), [localBranches]);
 
   return <div className="app gitwise-app">
@@ -107,13 +112,17 @@ export default function GitwiseApp() {
     <main className="main">
       <header className="workspace-header"><div><span className="eyebrow">Repository</span><div className="header-repo"><span>{repoName}</span><span className="slash">/</span><span className="branch-readout"><GitBranch size={14} />{currentBranch}</span></div></div><div className="header-actions"><button className="ghost-button" disabled={!connected || Boolean(busy)} onClick={() => void operate({ type: 'fetch' }, 'Fetch')}><RefreshCw size={16} />Fetch</button><button className="ghost-button" disabled={!connected || !snapshot?.upstream || Boolean(busy)} onClick={() => void operate({ type: 'pull', strategy: 'ff-only' }, 'Pull')}><ArrowDown size={16} />Pull</button><button className="primary-button" disabled={!connected || !snapshot?.branch || Boolean(busy)} onClick={() => void operate({ type: snapshot?.upstream ? 'push' : 'push', setUpstream: !snapshot?.upstream }, snapshot?.upstream ? 'Push' : 'Publish branch')}><ArrowUp size={16} />{snapshot?.upstream ? 'Push' : 'Publish'}{snapshot?.counts?.ahead ? <span className="button-count">{snapshot.counts.ahead}</span> : null}</button></div></header>
       <div className="content-scroll"><div className={connected ? 'notice' : 'notice demo'}><div className="notice-icon"><CheckCircle2 size={15} /></div><span>{statusText}</span></div>
+        {snapshot?.operation && <div className="notice operation-notice"><div className="notice-icon"><GitBranch size={15} /></div><span>An unfinished {snapshot.operation} needs attention before other Git actions can continue.</span>{snapshot.operation === 'merge' && <><button className="ghost-button compact" onClick={() => void operate({ type: 'merge-continue' }, 'Continue merge')}>Continue merge</button><button className="danger-outline compact" onClick={() => { if (window.confirm('Abort the current merge and return the repository to its previous state?')) void operate({ type: 'merge-abort' }, 'Abort merge'); }}>Abort merge</button></>}</div>}
+        {snapshot?.operation && snapshot.operation !== 'merge' && <div className="notice operation-notice"><div className="notice-icon"><GitBranch size={15} /></div><span>Continue or abort the active {snapshot.operation} after resolving any conflicts.</span><button className="ghost-button compact" onClick={() => void operate({ type: 'continue-operation' }, `Continue ${snapshot.operation}`)}>Continue</button><button className="danger-outline compact" onClick={() => confirm(`Abort ${snapshot.operation}?`, 'Gitwise will restore the repository to the state before this operation began.', 'Abort operation', () => void operate({ type: 'abort-operation' }, `Abort ${snapshot.operation}`))}>Abort</button></div>}
         {view === 'Home' && (connected ? <HomeView snapshot={snapshot} history={history} setView={setView} /> : <Empty onOpen={chooseRepository} />)}
         {view === 'Changes' && <ChangesSafe connected={connected} staged={staged} unstaged={unstaged} untracked={untracked} identity={snapshot?.identity} selected={selectedFile} diff={diff} commitMessage={commitMessage} setCommitMessage={setCommitMessage} openFile={openFile} operate={operate} />}
         {view === 'Branches' && <Branches connected={connected} branches={branches} draft={branchDraft} setDraft={setBranchDraft} selected={selectedBranch} setSelected={setSelectedBranch} operate={operate} />}
         {view === 'Compare' && <Compare connected={connected} branches={branchOptions} base={compareBase} head={compareHead} setBase={setCompareBase} setHead={setCompareHead} diff={compareDiff} load={loadComparison} operate={operate} />}
         {view === 'Pull requests' && <ConnectionState title="Pull requests need GitHub" detail="Gitwise has local Git access only. Connect a GitHub account in a future collaboration milestone to load pull requests, reviews, and checks." />}
         {view === 'Activity' && <ConnectionState title="Shared activity needs GitHub" detail="Gitwise cannot see teammates’ local or unpushed work. Connect GitHub to load pushed commits, reviews, merges, and workflow checks." />}
+        {connected && operations.length > 0 && <Operations records={operations} />}
       </div>
+      {confirmation && <ConfirmDialog title={confirmation.title} detail={confirmation.detail} confirmLabel={confirmation.confirmLabel} onCancel={() => setConfirmation(null)} onConfirm={() => { confirmation.action(); setConfirmation(null); }} />}
     </main>
   </div>;
 }
@@ -132,3 +141,5 @@ function ChangesSafe({ connected, staged, unstaged, untracked, identity, selecte
 function Branches({ connected, branches, draft, setDraft, selected, setSelected, operate }: { connected: boolean; branches: Branch[]; draft: string; setDraft: (value: string) => void; selected: Branch | null; setSelected: (value: Branch) => void; operate: (operation: unknown, label: string) => Promise<boolean> }) { if (!connected) return <Empty onOpen={() => {}} />; const local = branches.filter((branch) => !branch.remote); const remote = branches.filter((branch) => branch.remote); const render = (title: string, collection: Branch[]) => <section className="branch-group"><div className="group-title"><span>{title}</span><span className="muted">{collection.length}</span></div>{collection.map((branch) => <button className={selected?.fullName === branch.fullName ? 'branch-list-row selected' : 'branch-list-row'} key={branch.fullName} onClick={() => setSelected(branch)}><GitBranch size={16} /><div className="branch-name"><strong>{branch.name}</strong><span>{branch.subject || 'No commits yet'}</span></div>{branch.current && <span className="status-tag green">Current</span>}<span className="latest-sha">{branch.shortId}</span></button>)}</section>; return <div className="page"><div className="page-title"><div><span className="eyebrow">Repository map</span><h1>Branches</h1><p>Switch, create, merge, or delete branches with the exact effect shown.</p></div></div><div className="branch-create"><input value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="new branch name" /><button className="primary-button" disabled={!draft.trim()} onClick={async () => { if (await operate({ type: 'create-branch', name: draft.trim() }, 'Create branch')) setDraft(''); }}><Plus size={16} />Create branch</button></div><div className="branches-layout"><section className="panel branch-list-panel">{render('Local branches', local)}{render('Remote branches', remote)}</section><aside className="panel branch-detail">{selected ? <><span className="eyebrow">Selected branch</span><h2>{selected.name}</h2><p>{selected.upstream ? `Tracks ${selected.upstream}` : 'No upstream configured'}</p>{!selected.remote && !selected.current && <button className="primary-button" onClick={() => void operate({ type: 'switch-branch', name: selected.name }, 'Switch branch')}>Switch here</button>}{!selected.remote && !selected.current && <button className="danger-outline" onClick={() => { if (window.confirm(`Delete local branch ${selected.name}?`)) void operate({ type: 'delete-local-branch', name: selected.name }, 'Delete branch'); }}>Delete local branch</button>}{!selected.remote && !selected.current && <button className="ghost-button" onClick={() => { if (window.confirm(`Merge ${selected.name} into the current branch?`)) void operate({ type: 'merge', source: selected.name }, 'Merge branch'); }}>Merge into current</button>}</> : <div className="saved-empty">Select a branch to see its available actions.</div>}</aside></div></div>; }
 function Compare({ connected, branches, base, head, setBase, setHead, diff, load, operate }: { connected: boolean; branches: string[]; base: string; head: string; setBase: (value: string) => void; setHead: (value: string) => void; diff: string; load: () => void; operate: (operation: unknown, label: string) => Promise<void> }) { if (!connected) return <Empty onOpen={() => {}} />; return <div className="page"><div className="page-title"><div><span className="eyebrow">Compare branches</span><h1>What would change?</h1><p>The comparison uses the shared merge base: changes in comparison since it diverged from base.</p></div></div><div className="compare-controls"><label>Base<select value={base} onChange={(event) => setBase(event.target.value)}><option value="">Choose base</option>{branches.map((branch) => <option key={branch}>{branch}</option>)}</select></label><label>Comparison<select value={head} onChange={(event) => setHead(event.target.value)}><option value="">Choose comparison</option>{branches.map((branch) => <option key={branch}>{branch}</option>)}</select></label><button className="primary-button" onClick={load}>Compare</button>{head && <button className="ghost-button" onClick={() => { if (window.confirm(`Merge ${head} into the current branch?`)) void operate({ type: 'merge', source: head }, 'Merge branch'); }}>Merge comparison branch</button>}</div><section className="panel diff-panel"><pre className="real-diff">{diff || 'Choose two branches to see their actual diff.'}</pre></section></div>; }
 function ConnectionState({ title, detail }: { title: string; detail: string }) { return <div className="page empty-home"><div className="empty-hero"><div className="empty-mark"><CloudOff size={28} /></div><span className="eyebrow">Not connected</span><h1>{title}</h1><p>{detail}</p></div></div>; }
+function Operations({ records }: { records: OperationRecord[] }) { return <section className="panel operations-panel"><div className="panel-heading"><div><h2>Recent local operations</h2><p>Technical detail is sanitized before it is shown here.</p></div></div>{records.slice(0, 5).map((record) => <div className="operation-row" key={record.id}><span className={record.ok ? 'status-dot green' : 'status-dot danger'} /><div><strong>{record.label}</strong><span>{relativeTime(record.at)} · {record.ok ? 'Completed' : 'Needs attention'}</span></div><code>{record.detail || 'No output'}</code></div>)}</section>; }
+function ConfirmDialog({ title, detail, confirmLabel, onCancel, onConfirm }: { title: string; detail: string; confirmLabel: string; onCancel: () => void; onConfirm: () => void }) { return <div className="confirm-overlay" role="dialog" aria-modal="true" aria-labelledby="confirm-title"><section className="confirm-dialog"><span className="eyebrow">Confirm action</span><h2 id="confirm-title">{title}</h2><p>{detail}</p><div><button className="ghost-button" onClick={onCancel}>Cancel</button><button className="danger-outline" onClick={onConfirm}>{confirmLabel}</button></div></section></div>; }
