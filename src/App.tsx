@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   Activity, ArrowDown, ArrowUp, Bell, BookOpen, Branch, Check, CheckCircle2, ChevronDown,
   CircleAlert, Cloud, CloudOff, Code2, Command, Copy, FileCode2, FolderOpen, GitBranch,
-  GitCommitHorizontal, GitCompareArrows, Github, History, Home, Inbox, Layers3, Loader2,
+  GitCommitHorizontal, GitCompareArrows, History, Home, Inbox, Layers3, Loader2,
   Moon, MoreHorizontal, Plus, RefreshCw, Search, Settings2, SlidersHorizontal, Sparkles,
   Sun, TerminalSquare, UserRound, Users, X, Zap
 } from 'lucide-react';
@@ -10,8 +10,9 @@ import {
 type View = 'Home' | 'Changes' | 'Branches' | 'Pull requests' | 'Activity';
 type RepoFile = { index: string; worktree: string; path: string };
 type RepoData = { branch: string; files: RepoFile[]; counts: { ahead: number; behind: number }; log: string; ok: boolean };
+type Commit = { sha: string; message: string; author: string; initials: string; time: string; branch: string };
 
-const commits = [
+const commits: Commit[] = [
   { sha: 'a84c2d1', message: 'Refine onboarding empty state', author: 'Maya Chen', initials: 'MC', time: '18 min ago', branch: 'feature/onboarding' },
   { sha: '82f4e09', message: 'Add branch comparison summary', author: 'You', initials: 'YO', time: '46 min ago', branch: 'develop' },
   { sha: '2c47af8', message: 'Move repository actions into header', author: 'Noah Williams', initials: 'NW', time: '2 hr ago', branch: 'develop' },
@@ -33,17 +34,18 @@ const nav = [
 function App() {
   const [view, setView] = useState<View>('Home');
   const [dark, setDark] = useState(false);
-  const [repoPath, setRepoPath] = useState('C:/Users/geolo/OneDrive/Documents/repos/branchline');
+  const [repoPath, setRepoPath] = useState('');
   const [savedRepos, setSavedRepos] = useState<string[]>([]);
   const [branch, setBranch] = useState('develop');
   const [branchMenu, setBranchMenu] = useState(false);
-  const [notice, setNotice] = useState<string | null>('Demo mode · connect a local repository to refresh live status');
-  const [selectedCommit, setSelectedCommit] = useState<(typeof commits)[number] | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [selectedCommit, setSelectedCommit] = useState<Commit | null>(null);
   const [repoData, setRepoData] = useState<RepoData | null>(null);
 
-  const repoName = useMemo(() => repoPath.split(/[\\/]/).filter(Boolean).pop() || 'branchline', [repoPath]);
+  const repoName = useMemo(() => repoPath.split(/[\\/]/).filter(Boolean).pop() || 'No repository selected', [repoPath]);
 
   async function refreshRepo(path = repoPath) {
+    if (!path) { setRepoData(null); setNotice('Demo mode · open a local repository to refresh live status'); return; }
     const inspected = await window.branchline?.inspectRepository(path) as RepoData | undefined;
     if (inspected?.ok) {
       setRepoData(inspected);
@@ -76,6 +78,12 @@ function App() {
     setNotice('Opening repository…');
     await refreshRepo(path);
   }
+
+  const liveCommits = repoData?.log ? repoData.log.split(/\r?\n/).filter(Boolean).map((line) => {
+    const [fullSha, sha, author, time, ...messageParts] = line.split('\x1f');
+    const name = author || 'Unknown author';
+    return { sha: sha || fullSha?.slice(0, 7) || 'unknown', message: messageParts.join('\x1f') || 'Commit', author: name, initials: name.split(/\s+/).map((part) => part[0]).join('').slice(0, 2).toUpperCase(), time: time || 'recently', branch: repoData.branch || branch };
+  }) : commits;
 
   async function removeSavedRepository(path: string) {
     setSavedRepos(await window.branchline?.removeRepository(path) || []);
@@ -124,7 +132,7 @@ function App() {
 
         <div className="content-scroll">
           {notice && <div className={notice.includes('Demo') ? 'notice demo' : 'notice'}><div className="notice-icon"><Sparkles size={15} /></div><span>{notice}</span><button onClick={() => setNotice(null)} aria-label="Dismiss notification"><X size={15} /></button></div>}
-          {view === 'Home' && <HomeView repoName={repoName} branch={branch} setView={setView} runAction={runAction} selectedCommit={selectedCommit} setSelectedCommit={setSelectedCommit} repoData={repoData} />}
+          {view === 'Home' && (repoData ? <LiveHomeView repoName={repoName} branch={branch} setView={setView} runAction={runAction} selectedCommit={selectedCommit} setSelectedCommit={setSelectedCommit} repoData={repoData} commits={liveCommits} /> : <HomeView repoName={repoName} branch={branch} setView={setView} runAction={runAction} selectedCommit={selectedCommit} setSelectedCommit={setSelectedCommit} repoData={repoData} commits={liveCommits} />)}
           {view === 'Changes' && <ChangesView files={repoData ? repoData.files.map((file) => ({ path: file.path, state: file.index !== ' ' ? file.index : file.worktree, note: 'Live from Git', tone: file.index === '?' || file.worktree === '?' ? 'green' : 'blue' })) : files} runAction={runAction} operate={operate} />}
           {view === 'Branches' && <BranchesView branch={branch} setBranch={setBranch} operate={operate} />}
           {view === 'Pull requests' && <PullRequestView />}
@@ -135,7 +143,19 @@ function App() {
   );
 }
 
-function HomeView({ repoName, branch, setView, runAction, selectedCommit, setSelectedCommit, repoData }: { repoName: string; branch: string; setView: (v: View) => void; runAction: (l: string) => void; selectedCommit: (typeof commits)[number] | null; setSelectedCommit: (c: (typeof commits)[number] | null) => void; repoData: RepoData | null }) {
+function LiveHomeView({ repoName, branch, setView, runAction, selectedCommit, setSelectedCommit, repoData, commits: activity }: { repoName: string; branch: string; setView: (v: View) => void; runAction: (l: string) => void; selectedCommit: Commit | null; setSelectedCommit: (c: Commit | null) => void; repoData: RepoData; commits: Commit[] }) {
+  const changed = repoData.files.length;
+  return <div className="page home-page">
+    <div className="page-heading"><div><div className="breadcrumb"><span className="crumb-dot" />{repoName}<span>/</span>{branch}</div><h1>Repository overview</h1><p>Live local status for <strong>{repoName}</strong>.</p></div><div className="heading-actions"><button className="ghost-button" onClick={() => setView('Branches')}><GitCompareArrows size={16} />Compare branches</button><button className="ghost-button" onClick={() => runAction('Open terminal')}><TerminalSquare size={16} />Open terminal</button></div></div>
+    <section className="attention-banner"><div className="attention-leading"><div className="attention-icon"><GitBranch size={18} /></div><div><strong>{branch}</strong><span>{changed === 0 ? 'Working tree is clean.' : `${changed} local file${changed === 1 ? '' : 's'} need${changed === 1 ? 's' : ''} your attention.`}</span></div></div><button className="primary-button" onClick={() => setView('Changes')}>{changed === 0 ? 'View history' : 'Review changes'} <ArrowUp size={15} /></button></section>
+    <div className="overview-grid"><StatusCard icon={<FileCode2 size={18} />} label="Local changes" value={`${changed} file${changed === 1 ? '' : 's'}`} meta={changed === 0 ? 'Working tree clean' : 'From your local working tree'} action="Review changes" onClick={() => setView('Changes')} tone="blue" /><StatusCard icon={<ArrowDown size={18} />} label="Remote updates" value={`${repoData.counts.behind} commit${repoData.counts.behind === 1 ? '' : 's'}`} meta={repoData.counts.behind ? 'Available from the tracking branch' : 'Up to date with upstream'} action="Refresh remote" onClick={() => runAction('Fetch')} tone="violet" /><StatusCard icon={<ArrowUp size={18} />} label="Ready to share" value={`${repoData.counts.ahead} commit${repoData.counts.ahead === 1 ? '' : 's'}`} meta={repoData.counts.ahead ? 'Local commits ahead of upstream' : 'Nothing to push'} action="Review outgoing" onClick={() => runAction('Review outgoing')} tone="amber" /></div>
+    <div className="home-columns"><section className="panel activity-panel"><div className="panel-heading"><div><h2>Recent commits</h2><p>From this repository’s local history</p></div><button className="text-button" onClick={() => setView('Activity')}>View all <ArrowUp size={14} className="rotate-45" /></button></div><div className="activity-list">{activity.length ? activity.map((commit) => <button className={selectedCommit?.sha === commit.sha ? 'activity-row selected' : 'activity-row'} key={commit.sha} onClick={() => setSelectedCommit(commit)}><div className="commit-rail"><div className="commit-dot" /><div className="commit-line" /></div><div className="commit-copy"><div className="commit-title"><strong>{commit.message}</strong><span className="branch-pill"><GitBranch size={12} />{commit.branch}</span></div><div className="commit-meta"><div className={`avatar avatar-small avatar-${commit.initials.toLowerCase()}`}>{commit.initials}</div><span>{commit.author}</span><span>·</span><span>{commit.time}</span><span className="commit-sha">{commit.sha}</span></div></div><ChevronDown size={16} className="row-chevron" /></button>) : <div className="saved-empty">No commits found in this repository.</div>}</div></section><section className="panel pr-panel"><div className="panel-heading"><div><h2>GitHub collaboration</h2><p>Connect GitHub to load pull requests and checks</p></div><Code2 size={18} className="muted" /></div><div className="saved-empty collaboration-empty">Local Git is connected. GitHub data is not connected yet.</div><button className="panel-footer-action" onClick={() => runAction('Connect GitHub')}>Connect GitHub <ArrowUp size={14} className="rotate-45" /></button></section></div>
+    <section className="panel branch-strip"><div className="panel-heading"><div><h2>Branch snapshot</h2><p>Current local relationship with upstream</p></div><button className="text-button" onClick={() => setView('Branches')}>Explore branches <ArrowUp size={14} className="rotate-45" /></button></div><div className="branch-comparison"><div className="comparison-branch"><span className="branch-label"><span className="status-dot green" />Current branch</span><strong>{branch}</strong><span className="muted">local checkout</span></div><div className="comparison-track"><div className="track-line" /><div className="track-node local"><ArrowUp size={13} /></div><div className="track-node remote"><ArrowDown size={13} /></div><div className="track-labels"><span>{repoData.counts.ahead} outgoing</span><span>{repoData.counts.behind} incoming</span></div></div><div className="comparison-branch right"><span className="branch-label"><Cloud size={14} />Tracking branch</span><strong>upstream</strong><span className="muted">from local Git metadata</span></div></div></section>
+    {selectedCommit && <aside className="detail-drawer"><div className="drawer-header"><div><span className="eyebrow">Commit details</span><h2>{selectedCommit.message}</h2></div><button className="icon-button" onClick={() => setSelectedCommit(null)} aria-label="Close details"><X size={17} /></button></div><div className="drawer-meta"><div className="avatar avatar-indigo">{selectedCommit.initials}</div><div><strong>{selectedCommit.author}</strong><span>Committed {selectedCommit.time}</span></div></div><div className="drawer-code"><span>{selectedCommit.sha}</span><button className="icon-button tiny"><Copy size={14} /></button></div><button className="primary-button full" onClick={() => runAction('Open commit diff')}>Open full diff <ArrowUp size={15} /></button></aside>}
+  </div>;
+}
+
+function HomeView({ repoName, branch, setView, runAction, selectedCommit, setSelectedCommit, repoData, commits: activity }: { repoName: string; branch: string; setView: (v: View) => void; runAction: (l: string) => void; selectedCommit: Commit | null; setSelectedCommit: (c: Commit | null) => void; repoData: RepoData | null; commits: Commit[] }) {
   return <div className="page home-page">
     <div className="page-heading"><div><div className="breadcrumb"><span className="crumb-dot" />{repoName}<span>/</span>{branch}</div><h1>Good morning, Georgy</h1><p>Here’s what needs your attention in <strong>{repoName}</strong>.</p></div><div className="heading-actions"><button className="ghost-button" onClick={() => setView('Branches')}><GitCompareArrows size={16} />Compare branches</button><button className="ghost-button" onClick={() => runAction('Open terminal')}><TerminalSquare size={16} />Open terminal</button></div></div>
     <section className="attention-banner"><div className="attention-leading"><div className="attention-icon"><ArrowUp size={18} /></div><div><strong>3 commits ready to push</strong><span>Your local branch is ahead of <code>origin/develop</code>. Review before sharing.</span></div></div><button className="primary-button" onClick={() => runAction('Push')}>Review & push <ArrowUp size={15} /></button></section>
