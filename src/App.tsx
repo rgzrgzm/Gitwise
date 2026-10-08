@@ -57,8 +57,16 @@ function App() {
   useEffect(() => {
     void (async () => {
       const repositories = await window.branchline?.listRepositories();
-      if (repositories?.length) setRepoPath(repositories[0]);
-      setSavedRepos(repositories || []);
+      if (repositories?.length) {
+        setRepoPath(repositories[0]);
+        setSavedRepos(repositories);
+      } else {
+        const defaultRepository = await window.branchline?.defaultRepository();
+        if (defaultRepository) {
+          setRepoPath(defaultRepository);
+          setSavedRepos(await window.branchline?.saveRepository(defaultRepository) || []);
+        } else setSavedRepos([]);
+      }
     })();
   }, []);
   useEffect(() => { void refreshRepo(); }, [repoPath]);

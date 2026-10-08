@@ -53,6 +53,10 @@ app.whenReady().then(() => {
     return selection.canceled ? null : selection.filePaths[0];
   });
   ipcMain.handle('repo:list', () => readSavedRepositories());
+  ipcMain.handle('repo:default', async () => {
+    const result = await git(['rev-parse', '--show-toplevel'], process.cwd());
+    return result.ok ? result.stdout : null;
+  });
   ipcMain.handle('repo:save', (_, repoPath: string) => saveRepository(repoPath));
   ipcMain.handle('repo:remove', (_, repoPath: string) => removeRepository(repoPath));
   ipcMain.handle('repo:inspect', (_, repoPath: string) => inspectRepository(repoPath));

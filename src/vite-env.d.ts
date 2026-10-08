@@ -5,6 +5,7 @@ declare global {
     branchline?: {
       chooseRepository: () => Promise<string | null>;
       listRepositories: () => Promise<string[]>;
+      defaultRepository: () => Promise<string | null>;
       saveRepository: (repoPath: string) => Promise<string[]>;
       removeRepository: (repoPath: string) => Promise<string[]>;
       inspectRepository: (repoPath: string) => Promise<unknown>;
