@@ -34,6 +34,7 @@ function App() {
   const [view, setView] = useState<View>('Home');
   const [dark, setDark] = useState(false);
   const [repoPath, setRepoPath] = useState('C:/Users/geolo/OneDrive/Documents/repos/branchline');
+  const [savedRepos, setSavedRepos] = useState<string[]>([]);
   const [branch, setBranch] = useState('develop');
   const [branchMenu, setBranchMenu] = useState(false);
   const [notice, setNotice] = useState<string | null>('Demo mode · connect a local repository to refresh live status');
@@ -51,15 +52,33 @@ function App() {
     }
   }
 
+  useEffect(() => {
+    void (async () => {
+      const repositories = await window.branchline?.listRepositories();
+      if (repositories?.length) setRepoPath(repositories[0]);
+      setSavedRepos(repositories || []);
+    })();
+  }, []);
   useEffect(() => { void refreshRepo(); }, [repoPath]);
 
   async function chooseRepo() {
     const chosen = await window.branchline?.chooseRepository();
     if (!chosen) return;
     setRepoPath(chosen);
+    setSavedRepos(await window.branchline?.saveRepository(chosen) || []);
     setNotice('Repository selected · checking local status…');
     await refreshRepo(chosen);
     setNotice('Connected · local status refreshed just now');
+  }
+
+  async function openSavedRepository(path: string) {
+    setRepoPath(path);
+    setNotice('Opening repository…');
+    await refreshRepo(path);
+  }
+
+  async function removeSavedRepository(path: string) {
+    setSavedRepos(await window.branchline?.removeRepository(path) || []);
   }
 
   function runAction(label: string) {
@@ -86,10 +105,9 @@ function App() {
           {nav.map(({ label, icon: Icon, count }) => <button key={label} onClick={() => setView(label)} className={view === label ? 'nav-item active' : 'nav-item'}><Icon size={18} /><span>{label}</span>{count && <span className="nav-count">{count}</span>}</button>)}
         </nav>
         <div className="sidebar-section">
-          <div className="sidebar-label row-label"><span>Saved repositories</span><button className="icon-button tiny" title="Add repository"><Plus size={14} /></button></div>
-          <button className="saved-repo selected"><span className="status-dot green" /><span>branchline</span><span className="saved-branch">develop</span></button>
-          <button className="saved-repo"><span className="status-dot gray" /><span>qup-mobile</span></button>
-          <button className="saved-repo"><span className="status-dot gray" /><span>geo-crm</span></button>
+          <div className="sidebar-label row-label"><span>Saved repositories</span><button className="icon-button tiny" title="Add repository" onClick={chooseRepo}><Plus size={14} /></button></div>
+          {savedRepos.length === 0 && <div className="saved-empty">Open a repository to save it here.</div>}
+          {savedRepos.map((savedPath) => { const name = savedPath.split(/[\\/]/).filter(Boolean).pop() || savedPath; return <div className={savedPath === repoPath ? 'saved-repo-row selected' : 'saved-repo-row'} key={savedPath}><button className="saved-repo" onClick={() => void openSavedRepository(savedPath)}><span className="status-dot green" /><span title={savedPath}>{name}</span>{savedPath === repoPath && <span className="saved-branch">open</span>}</button><button className="saved-remove" onClick={() => void removeSavedRepository(savedPath)} title={`Remove ${name} from saved repositories`} aria-label={`Remove ${name} from saved repositories`}><X size={12} /></button></div>; })}
         </div>
         <div className="sidebar-bottom">
           <button className="nav-item"><Bell size={18} /><span>Notifications</span><span className="notification-dot" /></button>

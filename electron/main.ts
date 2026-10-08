@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
+import { promises as fs } from 'node:fs';
 
 const execFileAsync = promisify(execFile);
 
@@ -51,6 +52,9 @@ app.whenReady().then(() => {
     const selection = await dialog.showOpenDialog({ properties: ['openDirectory'] });
     return selection.canceled ? null : selection.filePaths[0];
   });
+  ipcMain.handle('repo:list', () => readSavedRepositories());
+  ipcMain.handle('repo:save', (_, repoPath: string) => saveRepository(repoPath));
+  ipcMain.handle('repo:remove', (_, repoPath: string) => removeRepository(repoPath));
   ipcMain.handle('repo:inspect', (_, repoPath: string) => inspectRepository(repoPath));
   ipcMain.handle('git:operate', (_, payload: { repoPath: string; operation: GitOperation }) => operateGit(payload.repoPath, payload.operation));
   createWindow();
@@ -106,4 +110,29 @@ async function operateGit(repoPath: string, operation: GitOperation) {
 
 function safePaths(paths: string[]) {
   return paths.filter((value) => value && value !== '.' && value !== '..' && !value.includes('\0'));
+}
+
+function repositoriesFile() { return path.join(app.getPath('userData'), 'repositories.json'); }
+
+async function readSavedRepositories(): Promise<string[]> {
+  try {
+    const parsed = JSON.parse(await fs.readFile(repositoriesFile(), 'utf8'));
+    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : [];
+  } catch { return []; }
+}
+
+async function writeSavedRepositories(repositories: string[]) {
+  await fs.mkdir(path.dirname(repositoriesFile()), { recursive: true });
+  await fs.writeFile(repositoriesFile(), JSON.stringify(repositories, null, 2), 'utf8');
+  return repositories;
+}
+
+async function saveRepository(repoPath: string) {
+  const current = await readSavedRepositories();
+  return writeSavedRepositories([repoPath, ...current.filter((value) => value !== repoPath)].slice(0, 12));
+}
+
+async function removeRepository(repoPath: string) {
+  const current = await readSavedRepositories();
+  return writeSavedRepositories(current.filter((value) => value !== repoPath));
 }
