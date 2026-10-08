@@ -6,5 +6,8 @@ contextBridge.exposeInMainWorld('branchline', {
   saveRepository: (repoPath: string) => ipcRenderer.invoke('repo:save', repoPath),
   removeRepository: (repoPath: string) => ipcRenderer.invoke('repo:remove', repoPath),
   inspectRepository: (repoPath: string) => ipcRenderer.invoke('repo:inspect', repoPath),
-  operateGit: (repoPath: string, operation: unknown) => ipcRenderer.invoke('git:operate', { repoPath, operation })
+  getHistory: (repoPath: string, limit = 50, skip = 0) => ipcRenderer.invoke('repo:history', repoPath, limit, skip),
+  getBranches: (repoPath: string) => ipcRenderer.invoke('repo:branches', repoPath),
+  getDiff: (repoPath: string, options: unknown) => ipcRenderer.invoke('repo:diff', repoPath, options),
+  operateGit: (repoPath: string, operation: unknown) => ipcRenderer.invoke('git:operate', repoPath, operation)
 });

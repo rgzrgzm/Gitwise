@@ -1,42 +1,33 @@
-# Branchline
+# Gitwise
 
-Branchline is a desktop Git workspace built with Electron, React, and TypeScript. It is designed around one question: “what is happening in this repository, and what should I do next?”
+Gitwise is an Electron desktop workspace for understanding and acting on local Git repositories without exposing arbitrary shell execution to the renderer.
 
-## Run locally
+## Run
 
-```bash
+```powershell
 npm install
 npm run dev
 ```
 
-Create a production build with:
+`npm run dev` starts Vite and Electron together. Development Electron loads the Vite server; packaged Electron loads the production build.
 
-```bash
+```powershell
 npm run build
 ```
 
-The project uses Electron with `contextIsolation: true` and `nodeIntegration: false`. Renderer code can only call the small preload bridge for repository selection, repository inspection, and validated Git argument arrays.
+## Current local Git capabilities
 
-## Current functionality
+- Open and persist validated local Git repositories.
+- Inspect the current branch, upstream relationship, remotes, author identity, working-tree state, and freshness.
+- Fetch, fast-forward pull, push, and publish a local branch.
+- Browse actual local and remote branches, create/switch/delete local branches, merge a selected branch, and compare two local branches.
+- Review real staged, unstaged, and untracked files; stage, unstage, discard with confirmation, stash, and commit staged work.
+- Browse real local history and file diffs.
 
-- Open an existing local repository folder through the native folder picker.
-- Inspect the current branch, working-tree status, remotes, ahead/behind counts, and recent commits through Electron’s main process.
-- Browse repository Home, Changes, Branches, Pull requests, and Activity workspaces.
-- Review staged/unstaged/untracked concepts, readable diffs, branch comparisons, pull request states, and contributor activity.
-- Use light/dark themes, keyboard-visible focus, responsive overflow handling, and explicit Git-language labels.
+GitHub authentication, pull requests, reviews, checks, and shared team activity are intentionally not connected yet. Those screens explicitly explain the unavailable integration instead of showing fabricated collaboration data.
 
-The home screen currently uses realistic, clearly labeled demo collaboration data until GitHub authentication and API integration are connected. Fetch, pull, push, stash, commit, and pull-request actions are presented as demo-mode feedback in this checkpoint; they do not mutate the active repository yet.
+## Security model
 
-## Authentication setup
+Electron uses `contextIsolation: true` and has Node integration disabled in the renderer. The preload bridge exposes only specific, validated repository queries and named Git operations. Git is run in Electron’s main process using argument arrays; no renderer-provided shell command is executed.
 
-GitHub authentication is intentionally not stored in renderer state or local storage. The next integration should use an Electron-safe OAuth/device flow and OS credential storage (for example, Keychain on macOS, Credential Manager on Windows, and Secret Service/libsecret on Linux). Git transport authentication remains separate from GitHub API authentication and should be configured through Git’s existing credential helpers or SSH agent.
-
-## Design direction
-
-The interface follows `PRODUCT_DESIGN_SYSTEM.md`: neutral layered surfaces, indigo as a restrained product accent, compact sidebar navigation, explicit status language, selected cards only where useful, visible focus states, and light/dark semantic tokens. The primary visual checkpoint is the repository Home view.
-
-## Known limitations
-
-- GitHub API authentication, pull-request mutations, reviews, checks, and remote activity are not connected yet.
-- Git mutations are not enabled in this checkpoint; local inspection is wired and safe.
-- Visual screenshot capture could not be performed in the current automation session; the renderer and Electron TypeScript build were both validated successfully.
+Git transport credentials remain managed by your existing Git credential helper or SSH agent. Gitwise does not store GitHub or transport credentials.
