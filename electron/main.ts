@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
@@ -19,6 +19,7 @@ type GitOperation =
   | { type: 'stash-pop' }
   | { type: 'stash-apply'; stashId: string }
   | { type: 'stash-pop-selected'; stashId: string }
+  | { type: 'apply-hunk'; path: string; staged: boolean; hunkIndex: number }
   | { type: 'create-branch'; name: string; startPoint?: string }
   | { type: 'switch-branch'; name: string }
   | { type: 'rename-branch'; oldName: string; newName: string }
@@ -59,6 +60,10 @@ function validateOperation(value: unknown): GitOperation | null {
     case 'stash': return operation.message === undefined || typeof operation.message === 'string' ? { type: 'stash', message: operation.message as string | undefined } : null;
     case 'stash-pop': return { type: 'stash-pop' };
     case 'stash-apply': case 'stash-pop-selected': return typeof operation.stashId === 'string' && /^[0-9a-f]{40,64}$/i.test(operation.stashId) ? { type: operation.type, stashId: operation.stashId } as GitOperation : null;
+    case 'apply-hunk': {
+      const hunkIndex = operation.hunkIndex;
+      return typeof operation.path === 'string' && validPaths([operation.path]) && typeof operation.staged === 'boolean' && typeof hunkIndex === 'number' && Number.isInteger(hunkIndex) && hunkIndex >= 0 && hunkIndex < 10000 ? { type: 'apply-hunk', path: operation.path, staged: operation.staged, hunkIndex } : null;
+    }
     case 'create-branch': return typeof operation.name === 'string' && (operation.startPoint === undefined || typeof operation.startPoint === 'string') ? { type: 'create-branch', name: operation.name, startPoint: operation.startPoint as string | undefined } : null;
     case 'switch-branch': return typeof operation.name === 'string' ? { type: 'switch-branch', name: operation.name } : null;
     case 'rename-branch': return typeof operation.oldName === 'string' && typeof operation.newName === 'string' ? { type: 'rename-branch', oldName: operation.oldName, newName: operation.newName } : null;
@@ -81,6 +86,19 @@ async function git(args: string[], cwd: string) {
     const e = error as { stdout?: string; stderr?: string; message?: string };
     return { ok: false, stdout: e.stdout?.trim() ?? '', stderr: e.stderr?.trim() || e.message || 'Git operation failed' };
   }
+}
+
+async function gitWithInput(args: string[], cwd: string, input: string) {
+  return new Promise<{ ok: boolean; stdout: string; stderr: string }>((resolve) => {
+    const process = spawn('git', args, { cwd, windowsHide: true });
+    let stdout = ''; let stderr = ''; let settled = false;
+    const finish = (result: { ok: boolean; stdout: string; stderr: string }) => { if (!settled) { settled = true; resolve(result); } };
+    process.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
+    process.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
+    process.on('error', (error) => finish({ ok: false, stdout: '', stderr: error.message || 'Git operation failed' }));
+    process.on('close', (code) => finish({ ok: code === 0, stdout: stdout.trim(), stderr: stderr.trim() }));
+    process.stdin.end(input, 'utf8');
+  });
 }
 
 function createWindow() {
@@ -221,6 +239,15 @@ async function operateGit(candidate: unknown, operation: unknown) {
         args = ['stash', request.type === 'stash-apply' ? 'apply' : 'pop', selected.selector];
         break;
       }
+      case 'apply-hunk': {
+        const diff = await git(['diff', '--no-ext-diff', '--unified=3', ...(request.staged ? ['--cached'] : []), '--', request.path], repository.path);
+        if (!diff.ok) return { ok: false, stdout: '', stderr: cleanGitError(diff.stderr) };
+        const patch = selectedHunkPatch(diff.stdout, request.hunkIndex);
+        if (!patch) return { ok: false, stdout: '', stderr: 'This hunk no longer matches the current diff. Refresh the file and choose it again.' };
+        const result = await gitWithInput(['apply', '--cached', '--recount', '--whitespace=nowarn', ...(request.staged ? ['-R'] : []), '-'], repository.path, patch);
+        recordOperation(repository.path, request.type, result.ok, result.ok ? result.stdout : result.stderr);
+        return { ...result, stderr: cleanGitError(result.stderr) };
+      }
       case 'create-branch':
         if (!validRef(request.name) || (request.startPoint && !validRef(request.startPoint))) return { ok: false, stdout: '', stderr: 'Use valid branch names.' };
         args = ['switch', '-c', request.name, ...(request.startPoint ? [request.startPoint] : [])]; break;
@@ -242,6 +269,16 @@ async function operateGit(candidate: unknown, operation: unknown) {
     recordOperation(repository.path, request.type, result.ok, result.ok ? result.stdout : result.stderr);
     return { ...result, stderr: cleanGitError(result.stderr) };
   } finally { activeOperations.delete(repository.path); }
+}
+
+function selectedHunkPatch(diff: string, hunkIndex: number) {
+  const lines = diff.split(/\r?\n/);
+  const starts = lines.reduce<number[]>((indexes, line, index) => { if (line.startsWith('@@ ')) indexes.push(index); return indexes; }, []);
+  if (hunkIndex < 0 || hunkIndex >= starts.length) return null;
+  const header = lines.slice(0, starts[0]);
+  if (!header.some((line) => line.startsWith('diff --git ')) || !header.some((line) => line.startsWith('--- ')) || !header.some((line) => line.startsWith('+++ '))) return null;
+  const end = starts[hunkIndex + 1] ?? lines.length;
+  return [...header, ...lines.slice(starts[hunkIndex], end)].join('\n').replace(/\n+$/, '\n');
 }
 
 async function getHistory(candidate: unknown, limit = 50, skip = 0, search: unknown = '') {
