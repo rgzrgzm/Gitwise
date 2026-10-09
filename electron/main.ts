@@ -119,16 +119,17 @@ async function readGitHubProfile() {
   } catch { return null; }
 }
 
-function githubRequest(pathname: string, token: string) {
+function githubRequest(pathname: string, token: string, method = 'GET', payload?: unknown) {
+  const bodyText = payload === undefined ? undefined : JSON.stringify(payload);
   return new Promise<{ ok: boolean; status: number; body: unknown; hasNextPage: boolean }>((resolve) => {
-    const request = https.request({ hostname: 'api.github.com', path: pathname, method: 'GET', headers: { Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}`, 'User-Agent': 'Gitwise', 'X-GitHub-Api-Version': '2026-03-10' } }, (response) => {
+    const request = https.request({ hostname: 'api.github.com', path: pathname, method, headers: { Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}`, 'User-Agent': 'Gitwise', 'X-GitHub-Api-Version': '2026-03-10', ...(bodyText === undefined ? {} : { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(bodyText) }) } }, (response) => {
       let raw = '';
       response.setEncoding('utf8');
       response.on('data', (chunk) => { raw += chunk; });
       response.on('end', () => { let body: unknown = null; try { body = raw ? JSON.parse(raw) : null; } catch { body = null; } resolve({ ok: Boolean(response.statusCode && response.statusCode >= 200 && response.statusCode < 300), status: response.statusCode || 0, body, hasNextPage: /rel="next"/.test(String(response.headers.link || '')) }); });
     });
     request.on('error', () => resolve({ ok: false, status: 0, body: null, hasNextPage: false }));
-    request.end();
+    request.end(bodyText);
   });
 }
 
@@ -208,6 +209,68 @@ async function getGitHubPullRequests(candidate: unknown, stateCandidate: unknown
     return [{ number, title, url, draft: Boolean(pull.draft), updatedAt: typeof pull.updated_at === 'string' ? pull.updated_at : null, author: typeof user?.login === 'string' ? user.login : 'Unknown author', authorAvatarUrl: typeof user?.avatar_url === 'string' ? user.avatar_url : null, head: typeof head?.label === 'string' ? head.label : 'Unknown branch', base: typeof base?.label === 'string' ? base.label : 'Unknown branch', comments: typeof pull.comments === 'number' ? pull.comments : 0, reviewComments: typeof pull.review_comments === 'number' ? pull.review_comments : 0 }];
   });
   return { ok: true, pullRequests, hasMore: response.hasNextPage, page: pageCandidate, checkedAt: new Date().toISOString() };
+}
+
+async function getGitHubPullRequestBranches(candidate: unknown) {
+  const repository = await resolveRepository(candidate);
+  if (!repository.ok) return { ok: false, error: repository.error, branches: [], defaultBranch: null };
+  const [token, remote] = await Promise.all([readGitHubToken(), getGitHubRemote(repository.path)]);
+  if (!token.ok || !token.token) return { ok: false, error: token.error || 'Connect GitHub before creating a pull request.', branches: [], defaultBranch: null };
+  if (!remote) return { ok: false, error: 'No github.com remote is configured for this repository.', branches: [], defaultBranch: null };
+  const prefix = `/repos/${encodeURIComponent(remote.owner)}/${encodeURIComponent(remote.name)}`;
+  const [repositoryResponse, firstPage] = await Promise.all([githubRequest(prefix, token.token), githubRequest(`${prefix}/branches?per_page=100&page=1`, token.token)]);
+  if (!repositoryResponse.ok) return { ok: false, error: githubApiError(repositoryResponse.status, repositoryResponse.body), branches: [], defaultBranch: null };
+  if (!firstPage.ok || !Array.isArray(firstPage.body)) return { ok: false, error: firstPage.status === 403 ? 'Loading GitHub branches requires Contents: Read permission on this repository.' : githubApiError(firstPage.status, firstPage.body), branches: [], defaultBranch: null };
+  const branches: Array<{ name: string; protected: boolean }> = [];
+  const addPage = (items: unknown[]) => items.forEach((item) => {
+    if (item && typeof item === 'object') {
+      const branch = item as Record<string, unknown>;
+      if (typeof branch.name === 'string') branches.push({ name: branch.name, protected: Boolean(branch.protected) });
+    }
+  });
+  addPage(firstPage.body);
+  let hasMore = firstPage.hasNextPage;
+  for (let page = 2; hasMore && page <= 5; page += 1) {
+    const response = await githubRequest(`${prefix}/branches?per_page=100&page=${page}`, token.token);
+    if (!response.ok || !Array.isArray(response.body)) return { ok: false, error: response.status === 403 ? 'Loading GitHub branches requires Contents: Read permission on this repository.' : githubApiError(response.status, response.body), branches: [], defaultBranch: null };
+    addPage(response.body); hasMore = response.hasNextPage;
+  }
+  const repoInfo = repositoryResponse.body as Record<string, unknown>;
+  return { ok: true, branches, defaultBranch: typeof repoInfo.default_branch === 'string' ? repoInfo.default_branch : null, truncated: hasMore, checkedAt: new Date().toISOString() };
+}
+
+async function createGitHubPullRequest(candidate: unknown, input: unknown) {
+  const repository = await resolveRepository(candidate);
+  if (!repository.ok) return { ok: false, error: repository.error };
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return { ok: false, error: 'Enter pull request details.' };
+  const form = input as Record<string, unknown>;
+  const title = typeof form.title === 'string' ? form.title.trim() : '';
+  const body = typeof form.body === 'string' ? form.body : '';
+  const head = form.head;
+  const base = form.base;
+  if (!title || title.length > 256) return { ok: false, error: 'Enter a title between 1 and 256 characters.' };
+  if (body.length > 65536) return { ok: false, error: 'The description must be 65,536 characters or fewer.' };
+  if (typeof head !== 'string' || typeof base !== 'string' || !validRef(head) || !validRef(base)) return { ok: false, error: 'Choose valid source and target branches.' };
+  if (head === base) return { ok: false, error: 'The source and target branches must be different.' };
+  if (typeof form.draft !== 'boolean') return { ok: false, error: 'Choose whether this pull request is a draft.' };
+  const [token, remote] = await Promise.all([readGitHubToken(), getGitHubRemote(repository.path)]);
+  if (!token.ok || !token.token) return { ok: false, error: token.error || 'Connect GitHub before creating a pull request.' };
+  if (!remote) return { ok: false, error: 'No github.com remote is configured for this repository.' };
+  const prefix = `/repos/${encodeURIComponent(remote.owner)}/${encodeURIComponent(remote.name)}`;
+  const [sourceResponse, targetResponse] = await Promise.all([
+    githubRequest(`${prefix}/branches/${encodeURIComponent(head)}`, token.token),
+    githubRequest(`${prefix}/branches/${encodeURIComponent(base)}`, token.token)
+  ]);
+  if (!sourceResponse.ok || !targetResponse.ok) return { ok: false, error: 'Both source and target must already exist on this GitHub repository. Publish the source branch first, then try again.' };
+  const response = await githubRequest(`${prefix}/pulls`, token.token, 'POST', { title, body, head, base, draft: form.draft });
+  if (!response.ok) {
+    if (response.status === 422) return { ok: false, error: 'GitHub could not create this pull request. Check that the branches differ, an open pull request does not already exist, and repository rules allow creation.' };
+    if (response.status === 403) return { ok: false, error: 'GitHub denied pull request creation. Check repository access, organization approval, and Pull requests: Write permission for this repository.' };
+    return { ok: false, error: githubApiError(response.status, response.body) };
+  }
+  const pull = response.body as Record<string, unknown> | null;
+  if (!pull || typeof pull.number !== 'number' || typeof pull.html_url !== 'string') return { ok: false, error: 'GitHub accepted the request but returned incomplete pull request details. Refresh the list to confirm it was created.' };
+  return { ok: true, pullRequest: { number: pull.number, title: typeof pull.title === 'string' ? pull.title : title, url: pull.html_url, draft: Boolean(pull.draft) } };
 }
 
 function normalizeGitHubActivity(events: unknown[], owner: string, name: string) {
@@ -416,6 +479,8 @@ app.whenReady().then(() => {
   ipcMain.handle('github:connect', (_, token: unknown) => connectGitHub(token));
   ipcMain.handle('github:disconnect', () => disconnectGitHub());
   ipcMain.handle('github:pull-requests', (_, repoPath: unknown, state: unknown, page: unknown) => getGitHubPullRequests(repoPath, state, page));
+  ipcMain.handle('github:pull-request-branches', (_, repoPath: unknown) => getGitHubPullRequestBranches(repoPath));
+  ipcMain.handle('github:create-pull-request', (_, repoPath: unknown, input: unknown) => createGitHubPullRequest(repoPath, input));
   ipcMain.handle('github:activity', (_, repoPath: unknown, page: unknown) => getGitHubActivity(repoPath, page));
   ipcMain.handle('github:pull-request-details', (_, repoPath: unknown, pullNumber: unknown) => getGitHubPullRequestDetails(repoPath, pullNumber));
   ipcMain.handle('github:pull-request-readiness', async (_, repoPath: unknown, pullNumber: unknown) => {
