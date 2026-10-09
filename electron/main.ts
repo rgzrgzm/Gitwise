@@ -510,6 +510,69 @@ async function getGitHubPullRequestChecks(candidate: unknown, pullNumber: unknow
   return { ok: true, checks, checkedAt: new Date().toISOString() };
 }
 
+type GitHubMergeMethod = 'merge' | 'squash' | 'rebase';
+async function getGitHubPullRequestMergeOptions(candidate: unknown, pullNumber: unknown) {
+  const context = await getPullRequestApiContext(candidate, pullNumber);
+  if (!context.ok) return { ok: false, error: context.error };
+  const number = pullNumber as number;
+  const [repositoryResponse, pullResponse, readinessResult] = await Promise.all([
+    githubRequest(`/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.name)}`, context.token),
+    githubRequest(`${context.prefix}/pulls/${number}`, context.token),
+    fetchReadiness(context.token, context.owner, context.name, number)
+  ]);
+  if (!repositoryResponse.ok) return { ok: false, error: githubApiError(repositoryResponse.status, repositoryResponse.body) };
+  if (!pullResponse.ok) return { ok: false, error: githubApiError(pullResponse.status, pullResponse.body) };
+  if (!readinessResult.ok || !readinessResult.readiness) return { ok: false, error: readinessResult.error || 'GitHub could not confirm current merge readiness.' };
+  const repository = repositoryResponse.body as Record<string, unknown> | null;
+  const pull = pullResponse.body as Record<string, unknown> | null;
+  const head = pull?.head as Record<string, unknown> | null;
+  const base = pull?.base as Record<string, unknown> | null;
+  const methods: GitHubMergeMethod[] = [];
+  if (repository?.allow_merge_commit === true) methods.push('merge');
+  if (repository?.allow_squash_merge === true) methods.push('squash');
+  if (repository?.allow_rebase_merge === true) methods.push('rebase');
+  if (!pull || typeof pull.title !== 'string' || typeof head?.sha !== 'string' || !readinessResult.readiness.headSha) return { ok: false, error: 'GitHub returned incomplete pull request merge data. Refresh and try again.' };
+  const shaMatches = head.sha === readinessResult.readiness.headSha;
+  const ready = pull.state === 'open' && !pull.draft && shaMatches && readinessResult.readiness.label === 'GitHub reports a clean merge' && readinessResult.readiness.mergeable === 'MERGEABLE';
+  return { ok: true, pullRequest: { number, title: pull.title, state: pull.state, draft: Boolean(pull.draft), headSha: head.sha, base: typeof base?.ref === 'string' ? base.ref : 'unknown target', head: typeof head.ref === 'string' ? head.ref : 'unknown source' }, methods, readiness: readinessResult.readiness, ready, shaMatches, checkedAt: new Date().toISOString() };
+}
+
+async function mergeGitHubPullRequest(candidate: unknown, pullNumber: unknown, methodCandidate: unknown) {
+  if (!['merge', 'squash', 'rebase'].includes(String(methodCandidate))) return { ok: false, error: 'Choose a valid merge method.' };
+  const options = await getGitHubPullRequestMergeOptions(candidate, pullNumber);
+  if (!options.ok || !options.pullRequest) return { ok: false, error: options.error || 'Unable to check merge eligibility.' };
+  if (!options.methods.includes(methodCandidate as GitHubMergeMethod)) return { ok: false, error: 'That merge method is disabled for this repository. Refresh the available methods.' };
+  if (!options.ready) return { ok: false, error: options.pullRequest.state !== 'open' ? 'This pull request is no longer open.' : options.pullRequest.draft ? 'Mark this pull request ready for review before merging.' : !options.shaMatches ? 'The pull request changed during the readiness check. Refresh and review the latest changes.' : options.readiness?.blockers?.[0] || 'GitHub does not currently report this pull request as ready to merge.' };
+  const context = await getPullRequestApiContext(candidate, pullNumber);
+  if (!context.ok) return { ok: false, error: context.error };
+  const number = pullNumber as number;
+  const response = await githubRequest(`${context.prefix}/pulls/${number}/merge-async`, context.token, 'PUT', { sha: options.pullRequest.headSha, merge_method: methodCandidate, merge_action: 'default', bypass_rules: false });
+  if (!response.ok) {
+    if (response.status === 400 || response.status === 405 || response.status === 409 || response.status === 422) return { ok: false, error: 'GitHub could not merge this pull request. Its rules or state may have changed, the method may no longer be valid, or a merge is already in progress. Refresh readiness and check GitHub for details.' };
+    if (response.status === 403) return { ok: false, error: 'GitHub denied the merge. Check Contents: Write permission, repository access, organization approval, and required reviews or checks.' };
+    return { ok: false, error: githubApiError(response.status, response.body) };
+  }
+  const body = response.body as Record<string, unknown> | null;
+  const details = body?.details as Record<string, unknown> | null;
+  const status = typeof body?.status === 'string' ? body.status : response.status === 202 ? 'pending' : 'unknown';
+  const uuid = typeof body?.uuid === 'string' ? body.uuid : typeof details?.uuid === 'string' ? details.uuid : null;
+  if (status === 'merged') return { ok: true, status: 'merged', sha: typeof details?.sha === 'string' ? details.sha : null, message: 'GitHub reports that the pull request is merged.' };
+  if (status === 'enqueued') return { ok: true, status: 'enqueued', message: 'GitHub added the pull request to its merge queue. It has not merged yet.' };
+  if (status === 'pending' && uuid) return { ok: true, status: 'pending', uuid, message: 'GitHub accepted the merge request. Waiting for GitHub to finish.' };
+  return { ok: true, status: 'unknown', message: 'GitHub accepted the merge request, but its current state is not available. Check the pull request on GitHub before retrying.' };
+}
+
+async function getGitHubPullRequestMergeResult(candidate: unknown, pullNumber: unknown, uuidCandidate: unknown) {
+  const context = await getPullRequestApiContext(candidate, pullNumber);
+  if (!context.ok) return { ok: false, error: context.error };
+  if (typeof uuidCandidate !== 'string' || !/^[0-9a-f-]{36}$/i.test(uuidCandidate)) return { ok: false, error: 'Choose a valid GitHub merge request.' };
+  const response = await githubRequest(`${context.prefix}/pulls/${pullNumber as number}/merge-async/${encodeURIComponent(uuidCandidate)}`, context.token);
+  if (!response.ok) return { ok: false, error: response.status === 404 ? 'GitHub no longer has this merge result. Check the pull request state on GitHub.' : githubApiError(response.status, response.body) };
+  const body = response.body as Record<string, unknown> | null;
+  const details = body?.details as Record<string, unknown> | null;
+  return { ok: true, status: typeof body?.status === 'string' ? body.status : 'unknown', message: typeof details?.message === 'string' ? details.message : null, sha: typeof details?.sha === 'string' ? details.sha : null };
+}
+
 async function openGitHubUrl(candidate: unknown) {
   if (typeof candidate !== 'string') return { ok: false };
   try {
@@ -567,6 +630,9 @@ app.whenReady().then(() => {
     if (!context.ok) return { ok: false, error: context.error };
     return fetchReadiness(context.token, context.owner, context.name, pullNumber as number);
   });
+  ipcMain.handle('github:pull-request-merge-options', (_, repoPath: unknown, pullNumber: unknown) => getGitHubPullRequestMergeOptions(repoPath, pullNumber));
+  ipcMain.handle('github:merge-pull-request', (_, repoPath: unknown, pullNumber: unknown, method: unknown) => mergeGitHubPullRequest(repoPath, pullNumber, method));
+  ipcMain.handle('github:pull-request-merge-result', (_, repoPath: unknown, pullNumber: unknown, uuid: unknown) => getGitHubPullRequestMergeResult(repoPath, pullNumber, uuid));
   ipcMain.handle('github:pull-request-section', (_, repoPath: unknown, pullNumber: unknown, section: unknown, page: unknown) => getGitHubPullRequestSection(repoPath, pullNumber, section, page));
   ipcMain.handle('github:create-pull-request-comment', (_, repoPath: unknown, pullNumber: unknown, body: unknown) => createGitHubPullRequestComment(repoPath, pullNumber, body));
   ipcMain.handle('github:submit-pull-request-review', (_, repoPath: unknown, pullNumber: unknown, event: unknown, body: unknown) => submitGitHubPullRequestReview(repoPath, pullNumber, event, body));

@@ -32,7 +32,7 @@ export function MergeReadinessPanel({ repoPath, pullNumber }: { repoPath: string
         {readiness.requirements.length > 0 ? <ul>{readiness.requirements.map((item) => <li key={item}>{item}</li>)}</ul> : <p>{readiness.protectionReported ? 'No review or check requirements were reported by this classic protection rule.' : 'Classic branch-protection requirements were not reported. This does not mean the branch has no rules.'}</p>}
         <p>Target: <code>{readiness.base || 'Unknown'}</code><br />Head: <code>{readiness.headSha || 'Unknown'}</code><br />Merge state: <code>{readiness.mergeState}</code> · Conflicts: <code>{readiness.mergeable}</code></p>
       </details>
-      <p className="merge-readiness-footnote">Snapshot checked {new Date(readiness.checkedAt).toLocaleTimeString()}. Additional rulesets, merge queues, deployments, and permissions may apply. This is not authorization to merge; no remote merge is performed here.</p>
+      <p className="merge-readiness-footnote">Snapshot checked {new Date(readiness.checkedAt).toLocaleTimeString()}. Additional rulesets, merge queues, deployments, and permissions may apply. This snapshot is advisory; the merge action performs its own fresh check and GitHub remains authoritative.</p>
     </>}
   </section>;
 }

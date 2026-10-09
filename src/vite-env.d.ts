@@ -24,6 +24,9 @@ declare global {
       getGitHubActivity: (repoPath: string, page: number) => Promise<unknown>;
       getGitHubPullRequestDetails: (repoPath: string, pullNumber: number) => Promise<unknown>;
       getGitHubPullRequestReadiness: (repoPath: string, pullNumber: number) => Promise<unknown>;
+      getGitHubPullRequestMergeOptions: (repoPath: string, pullNumber: number) => Promise<unknown>;
+      mergeGitHubPullRequest: (repoPath: string, pullNumber: number, method: 'merge' | 'squash' | 'rebase') => Promise<unknown>;
+      getGitHubPullRequestMergeResult: (repoPath: string, pullNumber: number, uuid: string) => Promise<unknown>;
       getGitHubPullRequestSection: (repoPath: string, pullNumber: number, section: string, page: number) => Promise<unknown>;
       createGitHubPullRequestComment: (repoPath: string, pullNumber: number, body: string) => Promise<unknown>;
       submitGitHubPullRequestReview: (repoPath: string, pullNumber: number, event: 'COMMENT' | 'APPROVE' | 'REQUEST_CHANGES', body: string) => Promise<unknown>;
