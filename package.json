@@ -9,7 +9,7 @@
     "build": "npm run build:renderer && tsc -p tsconfig.electron.json",
     "build:renderer": "vite build",
     "preview": "vite preview",
-    "test:readiness": "tsc -p tsconfig.electron.json && node --test tests/github-readiness.cjs tests/github-reviews.cjs",
+    "test:readiness": "tsc -p tsconfig.electron.json && tsc -p tsconfig.review-tests.json && node --test tests/github-readiness.cjs tests/github-reviews.cjs tests/review-draft.cjs",
     "test:reviews": "tsc -p tsconfig.electron.json && node --test tests/github-reviews.cjs"
   },
   "dependencies": {

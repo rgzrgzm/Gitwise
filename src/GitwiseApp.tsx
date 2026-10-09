@@ -6,6 +6,7 @@ import { CreatePullRequestDialog } from './components/CreatePullRequestDialog';
 import { PullRequestCommentForm } from './components/PullRequestCommentForm';
 import { PullRequestMergePanel } from './components/PullRequestMergePanel';
 import { PullRequestInlineDiff } from './components/PullRequestInlineDiff';
+import { removeReviewComment, stageReviewComment, submitReviewDraft } from './review-draft';
 
 type View = 'Home' | 'Changes' | 'Branches' | 'Compare' | 'Pull requests' | 'Activity';
 type FileState = { path: string; originalPath?: string; index: string; worktree: string; kind: 'tracked' | 'untracked' };
@@ -519,7 +520,7 @@ function ActivityView({ connected, onOpen, github, token, setToken, busy, connec
 
 function PullRequestContent({ detail, loading, error, loadMore, sectionLoading, onCommentPosted }: { detail: PullRequestDetail | null; loading: boolean; error: string; loadMore: (section: PullRequestSection) => void; sectionLoading: PullRequestSection | null; onCommentPosted: (comment: PullRequestEntry) => void }) {
   const [reviewDraft, setReviewDraft] = useState<Array<{ path: string; line: number; side: 'LEFT' | 'RIGHT'; body: string; id: string }>>([]);
-  const addReviewDraft = (comment: { path: string; line: number; side: 'LEFT' | 'RIGHT'; body: string }) => setReviewDraft((items) => [...items, { ...comment, id: crypto.randomUUID() }]);
+  const addReviewDraft = (comment: { path: string; line: number; side: 'LEFT' | 'RIGHT'; body: string }) => setReviewDraft((items) => stageReviewComment(items, comment, crypto.randomUUID()));
   useEffect(() => { setReviewDraft([]); }, [detail?.repositoryPath, detail?.number]);
   if (loading) return <p className="check-empty">Loading pull request description, commits, files, reviews, and comments…</p>;
   if (error) return <p className="check-empty error-text" role="alert">{error}</p>;
@@ -528,7 +529,7 @@ function PullRequestContent({ detail, loading, error, loadMore, sectionLoading, 
   return <section className="pull-content"><MergeReadinessPanel key={`${detail.repositoryPath}:${detail.number}`} repoPath={detail.repositoryPath} pullNumber={detail.number} /><div className="pull-content-summary"><div className="pull-content-branches"><code>{detail.head}</code><span>into</span><code>{detail.base}</code></div><p className="pull-content-description">{detail.body || 'No description provided.'}</p><span className="pull-content-updated">Updated {relativeTime(detail.updatedAt || new Date().toISOString())}</span></div><ReviewRequestPanel key={`${detail.repositoryPath}:${detail.number}`} detail={detail} />{labels.map(({ key, title }) => {
     const section = detail.sections[key];
     return <PullRequestSectionView key={key} sectionKey={key} title={title} section={section} detail={detail} sectionLoading={sectionLoading} loadMore={loadMore} onCommentPosted={onCommentPosted} onAddDraft={addReviewDraft} />;
-  })}{reviewDraft.length > 0 && <PullRequestReviewDraft key={`${detail.repositoryPath}:${detail.number}`} detail={detail} comments={reviewDraft} onRemove={(id) => setReviewDraft((items) => items.filter((item) => item.id !== id))} onClear={() => setReviewDraft([])} />}</section>;
+  })}{reviewDraft.length > 0 && <PullRequestReviewDraft key={`${detail.repositoryPath}:${detail.number}`} detail={detail} comments={reviewDraft} onRemove={(id) => setReviewDraft((items) => removeReviewComment(items, id))} onClear={() => setReviewDraft([])} />}</section>;
 }
 
 function PullRequestSectionView({ sectionKey, title, section, detail, sectionLoading, loadMore, onCommentPosted, onAddDraft }: { sectionKey: PullRequestSection; title: string; section: { items: PullRequestEntry[]; hasMore: boolean; page: number }; detail: PullRequestDetail; sectionLoading: PullRequestSection | null; loadMore: (section: PullRequestSection) => void; onCommentPosted: (comment: PullRequestEntry) => void; onAddDraft: (comment: { path: string; line: number; side: 'LEFT' | 'RIGHT'; body: string }) => void }) {
@@ -547,7 +548,7 @@ function PullRequestReviewDraft({ detail, comments, onRemove, onClear }: { detai
     if (!confirming) { setConfirming(true); return; }
     setBusy(true); setError('');
     try {
-      const result = await window.branchline?.submitGitHubPullRequestReview(detail.repositoryPath, detail.number, event, body, comments.map(({ path, line, side, body: commentBody }) => ({ path, line, side, body: commentBody }))) as { ok: boolean; confirmed?: boolean; review?: PullRequestEntry; comments?: PullRequestEntry[]; error?: string } | undefined;
+      const result = await submitReviewDraft({ repositoryPath: detail.repositoryPath, pullNumber: detail.number, decision: event, summary: body, comments }, (repositoryPath, number, decision, summary, inlineComments) => window.branchline!.submitGitHubPullRequestReview(repositoryPath, number, decision, summary, inlineComments)) as { ok: boolean; confirmed?: boolean; review?: PullRequestEntry; comments?: PullRequestEntry[]; error?: string } | undefined;
       if (!result?.ok) { setError(result?.error || 'Unable to submit this grouped review.'); setConfirming(false); return; }
       for (const comment of result.comments || []) window.dispatchEvent(new CustomEvent('gitwise:pull-request-inline-comment-posted', { detail: { repoPath: detail.repositoryPath, pullNumber: detail.number, comment } }));
       window.dispatchEvent(new CustomEvent('gitwise:pull-request-review-submitted', { detail: { repoPath: detail.repositoryPath, pullNumber: detail.number } }));
