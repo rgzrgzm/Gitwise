@@ -5,6 +5,7 @@ import { MergeReadinessPanel } from './components/MergeReadinessPanel';
 import { CreatePullRequestDialog } from './components/CreatePullRequestDialog';
 import { PullRequestCommentForm } from './components/PullRequestCommentForm';
 import { PullRequestMergePanel } from './components/PullRequestMergePanel';
+import { PullRequestInlineDiff } from './components/PullRequestInlineDiff';
 
 type View = 'Home' | 'Changes' | 'Branches' | 'Compare' | 'Pull requests' | 'Activity';
 type FileState = { path: string; originalPath?: string; index: string; worktree: string; kind: 'tracked' | 'untracked' };
@@ -288,6 +289,16 @@ export default function GitwiseApp() {
     });
   };
 
+  const handlePullRequestInlineCommentPosted = (number: number, comment: PullRequestEntry) => {
+    setPullRequestDetail((current) => {
+      if (current?.number !== number) return current;
+      const section = current.sections['review-comments'];
+      return { ...current, sections: { ...current.sections, 'review-comments': { ...section, items: [comment, ...section.items.filter((item) => item.id !== comment.id)].slice(0, 30) } } };
+    });
+    setPullRequests((current) => current.map((pull) => pull.number === number ? { ...pull, reviewComments: pull.reviewComments + 1 } : pull));
+    setSelectedPullRequest((current) => current?.number === number ? { ...current, reviewComments: current.reviewComments + 1 } : current);
+  };
+
   const loadActivity = async (page = 1) => {
     if (!repoPath || !github?.connected || !github.remote) return;
     const requestId = ++activityRequest.current;
@@ -314,6 +325,14 @@ export default function GitwiseApp() {
     window.addEventListener('gitwise:pull-request-merge-updated', handleMergeRefresh);
     return () => window.removeEventListener('gitwise:pull-request-merge-updated', handleMergeRefresh);
   }, [repoPath, pullRequestsState, selectedPullRequest?.number, github?.connected, github?.remote?.url]);
+  useEffect(() => {
+    const handleInlineComment = (event: Event) => {
+      const detail = (event as CustomEvent<{ repoPath?: string; pullNumber?: number; comment?: PullRequestEntry }>).detail;
+      if (detail?.repoPath === repoPath && typeof detail.pullNumber === 'number' && Number.isInteger(detail.pullNumber) && detail.comment) handlePullRequestInlineCommentPosted(detail.pullNumber, detail.comment);
+    };
+    window.addEventListener('gitwise:pull-request-inline-comment-posted', handleInlineComment);
+    return () => window.removeEventListener('gitwise:pull-request-inline-comment-posted', handleInlineComment);
+  }, [repoPath]);
   useEffect(() => { if (view === 'Activity' && github?.connected && github.remote) void loadActivity(1); }, [view, repoPath, github?.connected, github?.remote?.url]);
   useEffect(() => { if (selectedPullRequest) void loadPullRequestChecks(selectedPullRequest.number); }, [selectedPullRequest?.number]);
   useEffect(() => { if (selectedPullRequest) void loadPullRequestDetail(selectedPullRequest.number); else { pullRequestDetailRequest.current += 1; setPullRequestDetail(null); } }, [selectedPullRequest?.number, repoPath]);
@@ -497,8 +516,12 @@ function PullRequestContent({ detail, loading, error, loadMore, sectionLoading, 
   const labels: Array<{ key: PullRequestSection; title: string }> = [{ key: 'commits', title: 'Commits' }, { key: 'files', title: 'Changed files' }, { key: 'reviews', title: 'Reviews' }, { key: 'comments', title: 'Discussion' }, { key: 'review-comments', title: 'Inline review comments' }];
   return <section className="pull-content"><MergeReadinessPanel key={`${detail.repositoryPath}:${detail.number}`} repoPath={detail.repositoryPath} pullNumber={detail.number} /><div className="pull-content-summary"><div className="pull-content-branches"><code>{detail.head}</code><span>into</span><code>{detail.base}</code></div><p className="pull-content-description">{detail.body || 'No description provided.'}</p><span className="pull-content-updated">Updated {relativeTime(detail.updatedAt || new Date().toISOString())}</span></div><ReviewRequestPanel key={`${detail.repositoryPath}:${detail.number}`} detail={detail} />{labels.map(({ key, title }) => {
     const section = detail.sections[key];
-    return <details className="pull-content-section" key={key}><summary><span>{title}</span><span className="muted">{section.items.length}{section.hasMore ? '+' : ''}</span></summary>{section.items.length === 0 ? <p className="pull-content-empty">No {title.toLowerCase()} yet.</p> : <div className="pull-content-entries">{section.items.map((item) => <article className="pull-content-entry" key={item.id}><div className="pull-content-entry-heading"><strong title={item.title}>{item.title}</strong>{item.status && <span className="status-tag">{item.status}</span>}{item.additions !== undefined && <span className="pull-file-counts"><span>+{item.additions}</span> <span>−{item.deletions}</span></span>}</div>{(item.author || item.date) && <span className="pull-content-meta">{item.author || ''}{item.author && item.date ? ' · ' : ''}{item.date ? relativeTime(item.date) : ''}</span>}{item.body && <p className="pull-content-body">{item.body}</p>}{item.patch && <pre className="pull-content-patch">{item.patch}</pre>}{item.url && <button className="text-button pull-content-link" type="button" onClick={() => void window.branchline?.openGitHubUrl(item.url!)}>Open on GitHub</button>}</article>)}</div>}{section.hasMore && <button type="button" className="text-button pull-load-more" disabled={sectionLoading === key} onClick={() => loadMore(key)}>{sectionLoading === key ? 'Loading…' : `Load more ${title.toLowerCase()}`}</button>}{key === 'comments' && <PullRequestCommentForm repoPath={detail.repositoryPath} pullNumber={detail.number} onPosted={onCommentPosted} />}</details>;
+    return <PullRequestSectionView key={key} sectionKey={key} title={title} section={section} detail={detail} sectionLoading={sectionLoading} loadMore={loadMore} onCommentPosted={onCommentPosted} />;
   })}</section>;
+}
+
+function PullRequestSectionView({ sectionKey, title, section, detail, sectionLoading, loadMore, onCommentPosted }: { sectionKey: PullRequestSection; title: string; section: { items: PullRequestEntry[]; hasMore: boolean; page: number }; detail: PullRequestDetail; sectionLoading: PullRequestSection | null; loadMore: (section: PullRequestSection) => void; onCommentPosted: (comment: PullRequestEntry) => void }) {
+  return <details className="pull-content-section" key={sectionKey}><summary><span>{title}</span><span className="muted">{section.items.length}{section.hasMore ? '+' : ''}</span></summary>{section.items.length === 0 ? <p className="pull-content-empty">No {title.toLowerCase()} yet.</p> : <div className="pull-content-entries">{section.items.map((item) => <article className="pull-content-entry" key={item.id}><div className="pull-content-entry-heading"><strong title={item.title}>{item.title}</strong>{item.status && <span className="status-tag">{item.status}</span>}{item.additions !== undefined && <span className="pull-file-counts"><span>+{item.additions}</span> <span>−{item.deletions}</span></span>}</div>{(item.author || item.date) && <span className="pull-content-meta">{item.author || ''}{item.author && item.date ? ' · ' : ''}{item.date ? relativeTime(item.date) : ''}</span>}{item.body && <p className="pull-content-body">{item.body}</p>}{sectionKey === 'files' && item.patch ? <PullRequestInlineDiff repoPath={detail.repositoryPath} pullNumber={detail.number} filePath={item.title} patch={item.patch} canComment={detail.state === 'open'} /> : item.patch && <pre className="pull-content-patch">{item.patch}</pre>}{item.url && <button className="text-button pull-content-link" type="button" onClick={() => void window.branchline?.openGitHubUrl(item.url!)}>Open on GitHub</button>}</article>)}</div>}{section.hasMore && <button type="button" className="text-button pull-load-more" disabled={sectionLoading === sectionKey} onClick={() => loadMore(sectionKey)}>{sectionLoading === sectionKey ? 'Loading…' : `Load more ${title.toLowerCase()}`}</button>}{sectionKey === 'comments' && <PullRequestCommentForm repoPath={detail.repositoryPath} pullNumber={detail.number} onPosted={onCommentPosted} />}</details>;
 }
 
 function ReviewRequestPanel({ detail }: { detail: PullRequestDetail }) {

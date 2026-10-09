@@ -30,6 +30,7 @@ declare global {
       getGitHubPullRequestSection: (repoPath: string, pullNumber: number, section: string, page: number) => Promise<unknown>;
       createGitHubPullRequestComment: (repoPath: string, pullNumber: number, body: string) => Promise<unknown>;
       submitGitHubPullRequestReview: (repoPath: string, pullNumber: number, event: 'COMMENT' | 'APPROVE' | 'REQUEST_CHANGES', body: string) => Promise<unknown>;
+      createGitHubPullRequestInlineComment: (repoPath: string, pullNumber: number, filePath: string, line: number, side: 'LEFT' | 'RIGHT', body: string) => Promise<unknown>;
       requestGitHubPullRequestReviewers: (repoPath: string, pullNumber: number, users: string[], teams: string[]) => Promise<unknown>;
       getGitHubPullRequestChecks: (repoPath: string, pullNumber: number) => Promise<unknown>;
       openGitHubUrl: (url: string) => Promise<unknown>;

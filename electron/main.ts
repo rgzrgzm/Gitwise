@@ -453,6 +453,31 @@ async function submitGitHubPullRequestReview(candidate: unknown, pullNumber: unk
   return { ok: true, confirmed: true, review: item };
 }
 
+async function createGitHubPullRequestInlineComment(candidate: unknown, pullNumber: unknown, pathCandidate: unknown, lineCandidate: unknown, sideCandidate: unknown, bodyCandidate: unknown) {
+  const context = await getPullRequestApiContext(candidate, pullNumber);
+  if (!context.ok) return { ok: false, error: context.error };
+  if (typeof pathCandidate !== 'string' || !validPaths([pathCandidate])) return { ok: false, error: 'Choose a valid changed file from this pull request.' };
+  if (typeof lineCandidate !== 'number' || !Number.isInteger(lineCandidate) || lineCandidate < 1 || lineCandidate > 2000000) return { ok: false, error: 'Choose a valid changed line.' };
+  if (sideCandidate !== 'LEFT' && sideCandidate !== 'RIGHT') return { ok: false, error: 'Choose an added or deleted line from the diff.' };
+  if (typeof bodyCandidate !== 'string' || !bodyCandidate.trim() || bodyCandidate.length > 65536) return { ok: false, error: 'Enter an inline comment between 1 and 65,536 characters.' };
+  const number = pullNumber as number;
+  const current = await githubRequest(`${context.prefix}/pulls/${number}`, context.token);
+  if (!current.ok) return { ok: false, error: githubApiError(current.status, current.body) };
+  const pull = current.body as Record<string, unknown> | null;
+  const head = pull?.head as Record<string, unknown> | null;
+  if (!pull || pull.state !== 'open') return { ok: false, error: 'This pull request is no longer open. Refresh before commenting.' };
+  if (typeof head?.sha !== 'string') return { ok: false, error: 'GitHub did not provide the latest commit. Refresh the diff and try again.' };
+  const response = await githubRequest(`${context.prefix}/pulls/${number}/comments`, context.token, 'POST', { body: bodyCandidate.trim(), commit_id: head.sha, path: pathCandidate, line: lineCandidate, side: sideCandidate });
+  if (!response.ok) {
+    if (response.status === 403) return { ok: false, error: 'GitHub denied this comment. Check repository access, organization approval, and Pull requests: Write permission.' };
+    if (response.status === 422) return { ok: false, error: 'GitHub could not attach this comment to the latest diff. The file or line may have changed; refresh the pull request and choose the line again.' };
+    return { ok: false, error: githubApiError(response.status, response.body) };
+  }
+  const comment = normalizePullRequestSection('review-comments', [response.body])[0] as Record<string, unknown> | undefined;
+  if (!comment || !comment.id) return { ok: true, confirmed: false, error: 'GitHub accepted the comment but returned incomplete details. Refresh inline review comments to confirm it was posted.' };
+  return { ok: true, confirmed: true, comment };
+}
+
 async function requestGitHubPullRequestReviewers(candidate: unknown, pullNumber: unknown, usersCandidate: unknown, teamsCandidate: unknown) {
   const context = await getPullRequestApiContext(candidate, pullNumber);
   if (!context.ok) return { ok: false, error: context.error };
@@ -648,6 +673,7 @@ app.whenReady().then(() => {
   ipcMain.handle('github:pull-request-section', (_, repoPath: unknown, pullNumber: unknown, section: unknown, page: unknown) => getGitHubPullRequestSection(repoPath, pullNumber, section, page));
   ipcMain.handle('github:create-pull-request-comment', (_, repoPath: unknown, pullNumber: unknown, body: unknown) => createGitHubPullRequestComment(repoPath, pullNumber, body));
   ipcMain.handle('github:submit-pull-request-review', (_, repoPath: unknown, pullNumber: unknown, event: unknown, body: unknown) => submitGitHubPullRequestReview(repoPath, pullNumber, event, body));
+  ipcMain.handle('github:create-pull-request-inline-comment', (_, repoPath: unknown, pullNumber: unknown, filePath: unknown, line: unknown, side: unknown, body: unknown) => createGitHubPullRequestInlineComment(repoPath, pullNumber, filePath, line, side, body));
   ipcMain.handle('github:request-pull-request-reviewers', (_, repoPath: unknown, pullNumber: unknown, users: unknown, teams: unknown) => requestGitHubPullRequestReviewers(repoPath, pullNumber, users, teams));
   ipcMain.handle('github:pull-request-checks', (_, repoPath: unknown, pullNumber: unknown) => getGitHubPullRequestChecks(repoPath, pullNumber));
   ipcMain.handle('github:open-url', (_, url: unknown) => openGitHubUrl(url));
