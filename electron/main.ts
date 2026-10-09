@@ -183,7 +183,7 @@ function githubApiError(status: number, body: unknown) {
   if (status === 403) return 'GitHub denied access to this repository. Check the token permissions and repository access.';
   if (status === 404) return 'This GitHub repository is unavailable to the connected account. Check the remote and token access.';
   if (status === 0) return 'GitHub could not be reached. Check your network connection and try again.';
-  return 'GitHub could not load pull requests for this repository.';
+  return 'GitHub could not load repository data.';
 }
 
 async function getGitHubPullRequests(candidate: unknown) {
@@ -205,6 +205,68 @@ async function getGitHubPullRequests(candidate: unknown) {
     return [{ number, title, url, draft: Boolean(pull.draft), updatedAt: typeof pull.updated_at === 'string' ? pull.updated_at : null, author: typeof user?.login === 'string' ? user.login : 'Unknown author', authorAvatarUrl: typeof user?.avatar_url === 'string' ? user.avatar_url : null, head: typeof head?.label === 'string' ? head.label : 'Unknown branch', base: typeof base?.label === 'string' ? base.label : 'Unknown branch', comments: typeof pull.comments === 'number' ? pull.comments : 0, reviewComments: typeof pull.review_comments === 'number' ? pull.review_comments : 0 }];
   });
   return { ok: true, pullRequests, checkedAt: new Date().toISOString() };
+}
+
+function normalizeGitHubActivity(events: unknown[], owner: string, name: string) {
+  return events.flatMap((event) => {
+    if (!event || typeof event !== 'object') return [];
+    const item = event as Record<string, unknown>;
+    const actor = item.actor as Record<string, unknown> | null;
+    const payload = item.payload as Record<string, unknown> | null;
+    const type = item.type;
+    const actorName = typeof actor?.display_login === 'string' ? actor.display_login : typeof actor?.login === 'string' ? actor.login : 'Unknown contributor';
+    const createdAt = typeof item.created_at === 'string' ? item.created_at : null;
+    if (typeof item.id !== 'string' || !createdAt || !payload) return [];
+    const issue = payload.issue as Record<string, unknown> | null;
+    const pull = (payload.pull_request || (issue?.pull_request ? issue : null)) as Record<string, unknown> | null;
+    const ref = typeof payload.ref === 'string' ? payload.ref.replace(/^refs\/heads\//, '') : '';
+    const pullHead = pull?.head as Record<string, unknown> | null;
+    const pullBase = pull?.base as Record<string, unknown> | null;
+    const branches = [...new Set([ref, typeof pullHead?.ref === 'string' ? pullHead.ref : '', typeof pullBase?.ref === 'string' ? pullBase.ref : ''].filter(Boolean))];
+    const action = typeof payload.action === 'string' ? payload.action : '';
+    const number = typeof payload.number === 'number' ? payload.number : typeof pull?.number === 'number' ? pull.number : typeof issue?.number === 'number' ? issue.number : null;
+    const title = typeof pull?.title === 'string' ? pull.title : typeof issue?.title === 'string' ? issue.title : '';
+    const pullUrl = typeof pull?.html_url === 'string' ? pull.html_url : typeof issue?.html_url === 'string' ? issue.html_url : number ? `https://github.com/${owner}/${name}/pull/${number}` : null;
+    let eventTitle = ''; let summary = ''; let url: string | null = pullUrl; let kind = 'GitHub activity';
+    if (type === 'PushEvent') {
+      const size = typeof payload.size === 'number' ? payload.size : Array.isArray(payload.commits) ? payload.commits.length : 0;
+      const head = typeof payload.head === 'string' ? payload.head : '';
+      const before = typeof payload.before === 'string' ? payload.before : '';
+      eventTitle = `Pushed ${size || 'new'} commit${size === 1 ? '' : 's'}`;
+      summary = ref ? `to ${ref}` : 'Pushed commits to this repository';
+      url = head && before && !/^0+$/.test(before) ? `https://github.com/${owner}/${name}/compare/${before}...${head}` : head ? `https://github.com/${owner}/${name}/commit/${head}` : `https://github.com/${owner}/${name}/commits/${encodeURIComponent(ref || 'HEAD')}`;
+      kind = 'Push';
+    } else if (type === 'PullRequestEvent' && number) {
+      eventTitle = title || `Pull request #${number}`;
+      summary = `${action || 'updated'} pull request #${number}`;
+      kind = action === 'closed' && Boolean((payload.pull_request as Record<string, unknown> | null)?.merged) ? 'Merged pull request' : 'Pull request';
+    } else if (type === 'PullRequestReviewEvent' && number) {
+      eventTitle = title || `Review on pull request #${number}`;
+      summary = `${action || 'submitted'} a review on pull request #${number}`;
+      kind = 'Review';
+    } else if (type === 'PullRequestReviewCommentEvent' && number) {
+      eventTitle = title || `Comment on pull request #${number}`;
+      summary = `commented on pull request #${number}`;
+      kind = 'Review comment';
+    } else if (type === 'IssueCommentEvent' && number && (pull || issue?.pull_request)) {
+      eventTitle = title || `Comment on pull request #${number}`;
+      summary = `commented on pull request #${number}`;
+      kind = 'Discussion';
+    } else return [];
+    return [{ id: item.id, kind, actor: actorName, title: eventTitle, summary, branch: branches[0] || '', branches, createdAt, url, avatarUrl: typeof actor?.avatar_url === 'string' ? actor.avatar_url : null, number }];
+  });
+}
+
+async function getGitHubActivity(candidate: unknown, pageCandidate: unknown) {
+  if (typeof pageCandidate !== 'number' || !Number.isInteger(pageCandidate) || pageCandidate < 1 || pageCandidate > 3) return { ok: false, error: 'The activity feed has reached its available history.', events: [], hasMore: false };
+  const repository = await resolveRepository(candidate);
+  if (!repository.ok) return { ok: false, error: repository.error, events: [], hasMore: false };
+  const [token, remote] = await Promise.all([readGitHubToken(), getGitHubRemote(repository.path)]);
+  if (!token.ok || !token.token) return { ok: false, error: token.error || 'Connect GitHub before loading shared activity.', events: [], hasMore: false };
+  if (!remote) return { ok: false, error: 'No github.com remote is configured for this repository.', events: [], hasMore: false };
+  const response = await githubRequest(`/repos/${encodeURIComponent(remote.owner)}/${encodeURIComponent(remote.name)}/events?per_page=100&page=${pageCandidate}`, token.token);
+  if (!response.ok || !Array.isArray(response.body)) return { ok: false, error: githubApiError(response.status, response.body), events: [], hasMore: false };
+  return { ok: true, events: normalizeGitHubActivity(response.body, remote.owner, remote.name), hasMore: response.hasNextPage && pageCandidate < 3, checkedAt: new Date().toISOString(), historyLimited: pageCandidate >= 3 || !response.hasNextPage };
 }
 
 type PullRequestSection = 'commits' | 'files' | 'reviews' | 'comments' | 'review-comments';
@@ -351,6 +413,7 @@ app.whenReady().then(() => {
   ipcMain.handle('github:connect', (_, token: unknown) => connectGitHub(token));
   ipcMain.handle('github:disconnect', () => disconnectGitHub());
   ipcMain.handle('github:pull-requests', (_, repoPath: unknown) => getGitHubPullRequests(repoPath));
+  ipcMain.handle('github:activity', (_, repoPath: unknown, page: unknown) => getGitHubActivity(repoPath, page));
   ipcMain.handle('github:pull-request-details', (_, repoPath: unknown, pullNumber: unknown) => getGitHubPullRequestDetails(repoPath, pullNumber));
   ipcMain.handle('github:pull-request-section', (_, repoPath: unknown, pullNumber: unknown, section: unknown, page: unknown) => getGitHubPullRequestSection(repoPath, pullNumber, section, page));
   ipcMain.handle('github:pull-request-checks', (_, repoPath: unknown, pullNumber: unknown) => getGitHubPullRequestChecks(repoPath, pullNumber));

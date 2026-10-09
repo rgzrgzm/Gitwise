@@ -18,6 +18,7 @@ declare global {
       connectGitHub: (token: string) => Promise<unknown>;
       disconnectGitHub: () => Promise<unknown>;
       getGitHubPullRequests: (repoPath: string) => Promise<unknown>;
+      getGitHubActivity: (repoPath: string, page: number) => Promise<unknown>;
       getGitHubPullRequestDetails: (repoPath: string, pullNumber: number) => Promise<unknown>;
       getGitHubPullRequestSection: (repoPath: string, pullNumber: number, section: string, page: number) => Promise<unknown>;
       getGitHubPullRequestChecks: (repoPath: string, pullNumber: number) => Promise<unknown>;
