@@ -119,14 +119,14 @@ async function readGitHubProfile() {
 }
 
 function githubRequest(pathname: string, token: string) {
-  return new Promise<{ ok: boolean; status: number; body: unknown }>((resolve) => {
+  return new Promise<{ ok: boolean; status: number; body: unknown; hasNextPage: boolean }>((resolve) => {
     const request = https.request({ hostname: 'api.github.com', path: pathname, method: 'GET', headers: { Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}`, 'User-Agent': 'Gitwise', 'X-GitHub-Api-Version': '2026-03-10' } }, (response) => {
       let raw = '';
       response.setEncoding('utf8');
       response.on('data', (chunk) => { raw += chunk; });
-      response.on('end', () => { let body: unknown = null; try { body = raw ? JSON.parse(raw) : null; } catch { body = null; } resolve({ ok: Boolean(response.statusCode && response.statusCode >= 200 && response.statusCode < 300), status: response.statusCode || 0, body }); });
+      response.on('end', () => { let body: unknown = null; try { body = raw ? JSON.parse(raw) : null; } catch { body = null; } resolve({ ok: Boolean(response.statusCode && response.statusCode >= 200 && response.statusCode < 300), status: response.statusCode || 0, body, hasNextPage: /rel="next"/.test(String(response.headers.link || '')) }); });
     });
-    request.on('error', () => resolve({ ok: false, status: 0, body: null }));
+    request.on('error', () => resolve({ ok: false, status: 0, body: null, hasNextPage: false }));
     request.end();
   });
 }
@@ -179,6 +179,7 @@ function githubApiError(status: number, body: unknown) {
   const message = body && typeof body === 'object' && typeof (body as { message?: unknown }).message === 'string' ? (body as { message: string }).message : '';
   if (status === 401) return 'GitHub rejected the saved token. Disconnect and connect a valid token again.';
   if (status === 403 && /rate limit/i.test(message)) return 'GitHub API rate limit reached. Wait for GitHub to reset the limit, then refresh.';
+  if (status === 429) return 'GitHub is temporarily limiting API requests. Wait a moment, then refresh.';
   if (status === 403) return 'GitHub denied access to this repository. Check the token permissions and repository access.';
   if (status === 404) return 'This GitHub repository is unavailable to the connected account. Check the remote and token access.';
   if (status === 0) return 'GitHub could not be reached. Check your network connection and try again.';
@@ -204,6 +205,78 @@ async function getGitHubPullRequests(candidate: unknown) {
     return [{ number, title, url, draft: Boolean(pull.draft), updatedAt: typeof pull.updated_at === 'string' ? pull.updated_at : null, author: typeof user?.login === 'string' ? user.login : 'Unknown author', authorAvatarUrl: typeof user?.avatar_url === 'string' ? user.avatar_url : null, head: typeof head?.label === 'string' ? head.label : 'Unknown branch', base: typeof base?.label === 'string' ? base.label : 'Unknown branch', comments: typeof pull.comments === 'number' ? pull.comments : 0, reviewComments: typeof pull.review_comments === 'number' ? pull.review_comments : 0 }];
   });
   return { ok: true, pullRequests, checkedAt: new Date().toISOString() };
+}
+
+type PullRequestSection = 'commits' | 'files' | 'reviews' | 'comments' | 'review-comments';
+const pullRequestSectionPath: Record<PullRequestSection, (prefix: string, number: number, page: number) => string> = {
+  commits: (prefix, number, page) => `${prefix}/pulls/${number}/commits?per_page=30&page=${page}`,
+  files: (prefix, number, page) => `${prefix}/pulls/${number}/files?per_page=30&page=${page}`,
+  reviews: (prefix, number, page) => `${prefix}/pulls/${number}/reviews?per_page=30&page=${page}`,
+  comments: (prefix, number, page) => `${prefix}/issues/${number}/comments?per_page=30&page=${page}`,
+  'review-comments': (prefix, number, page) => `${prefix}/pulls/${number}/comments?per_page=30&page=${page}`
+};
+
+function normalizePullRequestSection(section: PullRequestSection, body: unknown) {
+  if (!Array.isArray(body)) return [];
+  return body.flatMap<unknown>((item) => {
+    if (!item || typeof item !== 'object') return [];
+    const value = item as Record<string, unknown>;
+    const user = value.user as Record<string, unknown> | null;
+    const author = typeof user?.login === 'string' ? user.login : 'Unknown author';
+    const url = typeof value.html_url === 'string' ? value.html_url : null;
+    if (section === 'commits') {
+      const commit = value.commit as Record<string, unknown> | null;
+      const authorInfo = commit?.author as Record<string, unknown> | null;
+      const message = typeof commit?.message === 'string' ? commit.message.split(/\r?\n/, 1)[0] : 'Commit';
+      return [{ id: typeof value.sha === 'string' ? value.sha : String(value.node_id || Math.random()), title: message, author: typeof authorInfo?.name === 'string' ? authorInfo.name : author, date: typeof authorInfo?.date === 'string' ? authorInfo.date : null, url }];
+    }
+    if (section === 'files') return [{ id: typeof value.filename === 'string' ? value.filename : String(value.sha || ''), title: typeof value.filename === 'string' ? value.filename : 'Changed file', status: typeof value.status === 'string' ? value.status : 'modified', additions: typeof value.additions === 'number' ? value.additions : 0, deletions: typeof value.deletions === 'number' ? value.deletions : 0, patch: typeof value.patch === 'string' ? value.patch : null, url: typeof value.blob_url === 'string' ? value.blob_url : url }];
+    if (section === 'reviews') return [{ id: typeof value.id === 'number' ? value.id : String(value.node_id || ''), title: typeof value.state === 'string' ? value.state.replace(/_/g, ' ').toLowerCase() : 'Review', author, body: typeof value.body === 'string' ? value.body : '', date: typeof value.submitted_at === 'string' ? value.submitted_at : null, url }];
+    return [{ id: typeof value.id === 'number' ? value.id : String(value.node_id || Math.random()), title: section === 'review-comments' ? `${typeof value.path === 'string' ? value.path : 'File'}${typeof value.line === 'number' ? `:${value.line}` : ''}` : 'Discussion', author, body: typeof value.body === 'string' ? value.body : '', date: typeof value.created_at === 'string' ? value.created_at : null, url }];
+  });
+}
+
+async function getPullRequestApiContext(candidate: unknown, pullNumber: unknown) {
+  if (typeof pullNumber !== 'number' || !Number.isInteger(pullNumber) || pullNumber < 1 || pullNumber > 100000000) return { ok: false as const, error: 'Choose a valid pull request.' };
+  const repository = await resolveRepository(candidate);
+  if (!repository.ok) return { ok: false as const, error: repository.error };
+  const [token, remote] = await Promise.all([readGitHubToken(), getGitHubRemote(repository.path)]);
+  if (!token.ok || !token.token) return { ok: false as const, error: token.error || 'Connect GitHub before loading pull request details.' };
+  if (!remote) return { ok: false as const, error: 'No github.com remote is configured for this repository.' };
+  return { ok: true as const, token: token.token, prefix: `/repos/${encodeURIComponent(remote.owner)}/${encodeURIComponent(remote.name)}` };
+}
+
+async function getGitHubPullRequestDetails(candidate: unknown, pullNumber: unknown) {
+  const context = await getPullRequestApiContext(candidate, pullNumber);
+  if (!context.ok) return { ok: false, error: context.error };
+  const number = pullNumber as number;
+  const [pullResponse, ...sectionResponses] = await Promise.all([
+    githubRequest(`${context.prefix}/pulls/${number}`, context.token),
+    ...(Object.keys(pullRequestSectionPath) as PullRequestSection[]).map((section) => githubRequest(pullRequestSectionPath[section](context.prefix, number, 1), context.token))
+  ]);
+  if (!pullResponse.ok) return { ok: false, error: githubApiError(pullResponse.status, pullResponse.body) };
+  const pull = pullResponse.body as Record<string, unknown> | null;
+  if (!pull || typeof pull.title !== 'string') return { ok: false, error: 'GitHub returned incomplete pull request details.' };
+  const sections = Object.keys(pullRequestSectionPath) as PullRequestSection[];
+  const data: Record<string, { items: unknown[]; hasMore: boolean; page: number }> = {};
+  for (let index = 0; index < sections.length; index += 1) {
+    const response = sectionResponses[index];
+    if (!response.ok || !Array.isArray(response.body)) return { ok: false, error: githubApiError(response.status, response.body) };
+    const section = sections[index];
+    data[section] = { items: normalizePullRequestSection(section, response.body), hasMore: response.hasNextPage, page: 1 };
+  }
+  return { ok: true, pullRequest: { number, title: pull.title, body: typeof pull.body === 'string' ? pull.body : '', state: typeof pull.state === 'string' ? pull.state : 'unknown', draft: Boolean(pull.draft), updatedAt: typeof pull.updated_at === 'string' ? pull.updated_at : null, head: typeof (pull.head as Record<string, unknown> | null)?.label === 'string' ? (pull.head as { label: string }).label : 'Unknown branch', base: typeof (pull.base as Record<string, unknown> | null)?.label === 'string' ? (pull.base as { label: string }).label : 'Unknown branch', url: typeof pull.html_url === 'string' ? pull.html_url : null }, sections: data, checkedAt: new Date().toISOString() };
+}
+
+async function getGitHubPullRequestSection(candidate: unknown, pullNumber: unknown, sectionCandidate: unknown, pageCandidate: unknown) {
+  const context = await getPullRequestApiContext(candidate, pullNumber);
+  if (!context.ok) return { ok: false, error: context.error, items: [], hasMore: false };
+  if (typeof sectionCandidate !== 'string' || !Object.prototype.hasOwnProperty.call(pullRequestSectionPath, sectionCandidate)) return { ok: false, error: 'Choose a valid pull request section.', items: [], hasMore: false };
+  if (typeof pageCandidate !== 'number' || !Number.isInteger(pageCandidate) || pageCandidate < 1 || pageCandidate > 1000) return { ok: false, error: 'Choose a valid page.', items: [], hasMore: false };
+  const section = sectionCandidate as PullRequestSection;
+  const response = await githubRequest(pullRequestSectionPath[section](context.prefix, pullNumber as number, pageCandidate), context.token);
+  if (!response.ok || !Array.isArray(response.body)) return { ok: false, error: githubApiError(response.status, response.body), items: [], hasMore: false };
+  return { ok: true, items: normalizePullRequestSection(section, response.body), hasMore: response.hasNextPage };
 }
 
 async function getGitHubPullRequestChecks(candidate: unknown, pullNumber: unknown) {
@@ -278,6 +351,8 @@ app.whenReady().then(() => {
   ipcMain.handle('github:connect', (_, token: unknown) => connectGitHub(token));
   ipcMain.handle('github:disconnect', () => disconnectGitHub());
   ipcMain.handle('github:pull-requests', (_, repoPath: unknown) => getGitHubPullRequests(repoPath));
+  ipcMain.handle('github:pull-request-details', (_, repoPath: unknown, pullNumber: unknown) => getGitHubPullRequestDetails(repoPath, pullNumber));
+  ipcMain.handle('github:pull-request-section', (_, repoPath: unknown, pullNumber: unknown, section: unknown, page: unknown) => getGitHubPullRequestSection(repoPath, pullNumber, section, page));
   ipcMain.handle('github:pull-request-checks', (_, repoPath: unknown, pullNumber: unknown) => getGitHubPullRequestChecks(repoPath, pullNumber));
   ipcMain.handle('github:open-url', (_, url: unknown) => openGitHubUrl(url));
   ipcMain.handle('repo:diff', (_, repoPath: unknown, options?: { path?: string; staged?: boolean; base?: string; compare?: string }) => getDiff(repoPath, options));
