@@ -340,7 +340,7 @@ const pullRequestSectionPath: Record<PullRequestSection, (prefix: string, number
   commits: (prefix, number, page) => `${prefix}/pulls/${number}/commits?per_page=30&page=${page}`,
   files: (prefix, number, page) => `${prefix}/pulls/${number}/files?per_page=30&page=${page}`,
   reviews: (prefix, number, page) => `${prefix}/pulls/${number}/reviews?per_page=30&page=${page}`,
-  comments: (prefix, number, page) => `${prefix}/issues/${number}/comments?per_page=30&page=${page}`,
+  comments: (prefix, number, page) => `${prefix}/issues/${number}/comments?sort=created&direction=desc&per_page=30&page=${page}`,
   'review-comments': (prefix, number, page) => `${prefix}/pulls/${number}/comments?per_page=30&page=${page}`
 };
 
@@ -405,6 +405,25 @@ async function getGitHubPullRequestSection(candidate: unknown, pullNumber: unkno
   const response = await githubRequest(pullRequestSectionPath[section](context.prefix, pullNumber as number, pageCandidate), context.token);
   if (!response.ok || !Array.isArray(response.body)) return { ok: false, error: githubApiError(response.status, response.body), items: [], hasMore: false };
   return { ok: true, items: normalizePullRequestSection(section, response.body), hasMore: response.hasNextPage };
+}
+
+async function createGitHubPullRequestComment(candidate: unknown, pullNumber: unknown, bodyCandidate: unknown) {
+  const context = await getPullRequestApiContext(candidate, pullNumber);
+  if (!context.ok) return { ok: false, error: context.error };
+  if (typeof bodyCandidate !== 'string' || !bodyCandidate.trim() || bodyCandidate.length > 65536) return { ok: false, error: 'Enter a comment between 1 and 65,536 characters.' };
+  const number = pullNumber as number;
+  const pullResponse = await githubRequest(`${context.prefix}/pulls/${number}`, context.token);
+  if (!pullResponse.ok) return { ok: false, error: githubApiError(pullResponse.status, pullResponse.body) };
+  const response = await githubRequest(`${context.prefix}/issues/${number}/comments`, context.token, 'POST', { body: bodyCandidate.trim() });
+  if (!response.ok) {
+    if (response.status === 403) return { ok: false, error: 'GitHub denied commenting. Check repository access, organization approval, and Pull requests: Write (or Issues: Write) permission.' };
+    if (response.status === 410) return { ok: false, error: 'GitHub has locked this conversation, so it cannot accept new comments.' };
+    if (response.status === 422) return { ok: false, error: 'GitHub rejected this comment. Check its contents and try again.' };
+    return { ok: false, error: githubApiError(response.status, response.body) };
+  }
+  const comment = normalizePullRequestSection('comments', [response.body])[0] as Record<string, unknown> | undefined;
+  if (!comment || !comment.id) return { ok: false, error: 'GitHub accepted the comment but returned incomplete details. Refresh the discussion to confirm it was posted.' };
+  return { ok: true, comment };
 }
 
 async function getGitHubPullRequestChecks(candidate: unknown, pullNumber: unknown) {
@@ -489,6 +508,7 @@ app.whenReady().then(() => {
     return fetchReadiness(context.token, context.owner, context.name, pullNumber as number);
   });
   ipcMain.handle('github:pull-request-section', (_, repoPath: unknown, pullNumber: unknown, section: unknown, page: unknown) => getGitHubPullRequestSection(repoPath, pullNumber, section, page));
+  ipcMain.handle('github:create-pull-request-comment', (_, repoPath: unknown, pullNumber: unknown, body: unknown) => createGitHubPullRequestComment(repoPath, pullNumber, body));
   ipcMain.handle('github:pull-request-checks', (_, repoPath: unknown, pullNumber: unknown) => getGitHubPullRequestChecks(repoPath, pullNumber));
   ipcMain.handle('github:open-url', (_, url: unknown) => openGitHubUrl(url));
   ipcMain.handle('repo:diff', (_, repoPath: unknown, options?: { path?: string; staged?: boolean; base?: string; compare?: string }) => getDiff(repoPath, options));
