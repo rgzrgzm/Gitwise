@@ -13,6 +13,9 @@ type MergeOptions = {
 type MergeResult = { status: 'pending' | 'merged' | 'enqueued' | 'unknown' | 'failed'; uuid?: string; sha?: string | null; message?: string | null };
 
 const methodLabels: Record<Method, string> = { merge: 'Create a merge commit', squash: 'Squash and merge', rebase: 'Rebase and merge' };
+function notifyMergeStateRefresh(repoPath: string, pullNumber: number, status: string) {
+  window.dispatchEvent(new CustomEvent('gitwise:pull-request-merge-updated', { detail: { repoPath, pullNumber, status } }));
+}
 
 export function PullRequestMergePanel({ repoPath, pullNumber, title, url }: { repoPath: string; pullNumber: number; title: string; url: string }) {
   const [options, setOptions] = useState<MergeOptions | null>(null);
@@ -38,13 +41,16 @@ export function PullRequestMergePanel({ repoPath, pullNumber, title, url }: { re
   useEffect(() => { void refreshOptions(); }, [repoPath, pullNumber]);
 
   useEffect(() => {
-    if (result?.status !== 'pending' || !result.uuid || pollCount >= 30) return;
+    const waiting = result?.status === 'pending' && Boolean(result.uuid) && pollCount < 30;
+    const queued = result?.status === 'enqueued' && pollCount < 10;
+    if (!waiting && !queued) return;
     const timeout = window.setTimeout(async () => {
-      const next = await window.branchline?.getGitHubPullRequestMergeResult(repoPath, pullNumber, result.uuid!) as { ok: boolean; status?: string; sha?: string | null; message?: string | null; error?: string } | undefined;
+      const next = await window.branchline?.getGitHubPullRequestMergeResult(repoPath, pullNumber, result.uuid || null) as { ok: boolean; status?: string; sha?: string | null; message?: string | null; error?: string } | undefined;
       if (!next?.ok) { setError(next?.error || 'Unable to check the merge result. Check GitHub before retrying.'); setResult({ status: 'unknown', uuid: result.uuid }); return; }
       setPollCount((count) => count + 1);
-      if (next.status === 'merged' || next.status === 'enqueued' || next.status === 'failed') setResult({ status: next.status, uuid: result.uuid, sha: next.sha, message: next.message });
-    }, 2000);
+      if (next.status === 'merged' || next.status === 'failed') { setResult({ status: next.status, uuid: result.uuid, sha: next.sha, message: next.message }); notifyMergeStateRefresh(repoPath, pullNumber, next.status); }
+      else if (next.status === 'enqueued') { if (result.status !== 'enqueued') notifyMergeStateRefresh(repoPath, pullNumber, 'enqueued'); setResult({ status: 'enqueued', uuid: result.uuid, sha: next.sha, message: next.message || 'Still waiting in GitHub’s merge queue. It has not merged yet.' }); }
+    }, queued ? 15000 : 2000);
     return () => window.clearTimeout(timeout);
   }, [result, pollCount, repoPath, pullNumber]);
 
@@ -55,6 +61,7 @@ export function PullRequestMergePanel({ repoPath, pullNumber, title, url }: { re
       const response = await window.branchline?.mergeGitHubPullRequest(repoPath, pullNumber, method) as { ok: boolean; status?: MergeResult['status']; uuid?: string; sha?: string | null; message?: string; error?: string } | undefined;
       if (!response?.ok) { setError(response?.error || 'GitHub did not merge this pull request. Refresh readiness and try again.'); return; }
       setResult({ status: response.status || 'unknown', uuid: response.uuid, sha: response.sha, message: response.message });
+      notifyMergeStateRefresh(repoPath, pullNumber, response.status || 'unknown');
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Unable to merge this pull request. Check GitHub before retrying.'); }
     finally { setSubmitting(false); }
   }
@@ -67,7 +74,7 @@ export function PullRequestMergePanel({ repoPath, pullNumber, title, url }: { re
       {options.methods?.length ? <label className="pr-merge-method">Merge method<select value={method} onChange={(event) => setMethod(event.target.value as Method)} disabled={submitting || !options.ready}>{options.methods.map((item) => <option key={item} value={item}>{methodLabels[item]}</option>)}</select></label> : <p className="error-text">GitHub reports that all standard merge methods are disabled for this repository.</p>}
       {!options.ready && <div className="pr-merge-blockers"><strong>{options.readiness?.label || 'Not ready to merge'}</strong>{options.readiness?.blockers?.length ? <ul>{options.readiness.blockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul> : <p>GitHub does not currently report a clean, mergeable pull request. Refresh readiness after resolving any blockers.</p>}</div>}
       {error && <p className="connection-error" role="alert">{error}</p>}
-      {result && <div className={result.status === 'merged' ? 'pr-merge-result success' : result.status === 'failed' ? 'pr-merge-result failure' : 'pr-merge-result'} role={result.status === 'failed' ? 'alert' : 'status'}><strong>{result.status === 'merged' ? 'Merged on GitHub' : result.status === 'enqueued' ? 'Added to GitHub merge queue' : result.status === 'pending' ? `Merge request in progress${pollCount >= 30 ? ' · still processing' : '…'}` : result.status === 'failed' ? 'GitHub could not complete the merge' : 'Merge status needs confirmation'}</strong><span>{result.message || (result.status === 'enqueued' ? 'This is queued, not merged yet.' : result.status === 'unknown' ? 'Check the pull request on GitHub before retrying.' : '')}</span>{result.sha && <code>Merge commit {result.sha.slice(0, 12)}</code>}{(result.status === 'merged' || result.status === 'enqueued' || result.status === 'unknown' || result.status === 'failed') && <button className="text-button" type="button" onClick={() => void window.branchline?.openGitHubUrl(url)}>Open pull request on GitHub</button>}</div>}
+      {result && <div className={result.status === 'merged' ? 'pr-merge-result success' : result.status === 'failed' ? 'pr-merge-result failure' : 'pr-merge-result'} role={result.status === 'failed' ? 'alert' : 'status'}><strong>{result.status === 'merged' ? 'Merged on GitHub' : result.status === 'enqueued' ? 'Added to GitHub merge queue' : result.status === 'pending' ? `Merge request in progress${pollCount >= 30 ? ' · still processing' : '…'}` : result.status === 'failed' ? 'GitHub could not complete the merge' : 'Merge status needs confirmation'}</strong><span>{result.message || (result.status === 'enqueued' ? pollCount >= 10 ? 'Still queued. Automatic checks paused; refresh GitHub to check later.' : 'This is queued, not merged yet.' : result.status === 'unknown' ? 'Check the pull request on GitHub before retrying.' : '')}</span>{result.sha && <code>Merge commit {result.sha.slice(0, 12)}</code>}{(result.status === 'pending' && pollCount >= 30 || result.status === 'enqueued' && pollCount >= 10) && <button className="text-button" type="button" onClick={() => setPollCount(0)}>Check merge status again</button>}{(result.status === 'merged' || result.status === 'enqueued' || result.status === 'unknown' || result.status === 'failed') && <button className="text-button" type="button" onClick={() => void window.branchline?.openGitHubUrl(url)}>Open pull request on GitHub</button>}</div>}
       {options.ready && !result && !confirmation && <button className="primary-button" type="button" disabled={!canMerge || submitting} onClick={() => setConfirmation(true)}>Review merge</button>}
       {confirmation && <div className="pr-merge-confirm" role="group" aria-label="Confirm remote pull request merge"><p>This will merge <strong>#{pullNumber} {title}</strong> into <code>{options.pullRequest?.base}</code> on GitHub using <strong>{methodLabels[method]}</strong>. This changes the remote repository; it does not switch or merge your local branch.</p><div><button className="ghost-button" type="button" onClick={() => setConfirmation(false)} disabled={submitting}>Cancel</button><button className="primary-button" type="button" onClick={() => void submitMerge()} disabled={!canMerge || submitting}>{submitting ? 'Submitting to GitHub…' : 'Confirm merge'}</button></div></div>}
       <p className="pr-merge-footnote">Gitwise rechecks state and readiness immediately before sending the request. GitHub’s rules and permissions remain authoritative; Gitwise never bypasses them.</p>

@@ -23,7 +23,7 @@ contextBridge.exposeInMainWorld('branchline', {
   getGitHubPullRequestReadiness: (repoPath: string, pullNumber: number) => ipcRenderer.invoke('github:pull-request-readiness', repoPath, pullNumber),
   getGitHubPullRequestMergeOptions: (repoPath: string, pullNumber: number) => ipcRenderer.invoke('github:pull-request-merge-options', repoPath, pullNumber),
   mergeGitHubPullRequest: (repoPath: string, pullNumber: number, method: 'merge' | 'squash' | 'rebase') => ipcRenderer.invoke('github:merge-pull-request', repoPath, pullNumber, method),
-  getGitHubPullRequestMergeResult: (repoPath: string, pullNumber: number, uuid: string) => ipcRenderer.invoke('github:pull-request-merge-result', repoPath, pullNumber, uuid),
+  getGitHubPullRequestMergeResult: (repoPath: string, pullNumber: number, uuid: string | null) => ipcRenderer.invoke('github:pull-request-merge-result', repoPath, pullNumber, uuid),
   getGitHubPullRequestSection: (repoPath: string, pullNumber: number, section: string, page: number) => ipcRenderer.invoke('github:pull-request-section', repoPath, pullNumber, section, page),
   createGitHubPullRequestComment: (repoPath: string, pullNumber: number, body: string) => ipcRenderer.invoke('github:create-pull-request-comment', repoPath, pullNumber, body),
   submitGitHubPullRequestReview: (repoPath: string, pullNumber: number, event: 'COMMENT' | 'APPROVE' | 'REQUEST_CHANGES', body: string) => ipcRenderer.invoke('github:submit-pull-request-review', repoPath, pullNumber, event, body),

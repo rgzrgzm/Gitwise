@@ -557,7 +557,7 @@ async function mergeGitHubPullRequest(candidate: unknown, pullNumber: unknown, m
   const status = typeof body?.status === 'string' ? body.status : response.status === 202 ? 'pending' : 'unknown';
   const uuid = typeof body?.uuid === 'string' ? body.uuid : typeof details?.uuid === 'string' ? details.uuid : null;
   if (status === 'merged') return { ok: true, status: 'merged', sha: typeof details?.sha === 'string' ? details.sha : null, message: 'GitHub reports that the pull request is merged.' };
-  if (status === 'enqueued') return { ok: true, status: 'enqueued', message: 'GitHub added the pull request to its merge queue. It has not merged yet.' };
+  if (status === 'enqueued') return { ok: true, status: 'enqueued', uuid, message: 'GitHub added the pull request to its merge queue. It has not merged yet.' };
   if (status === 'pending' && uuid) return { ok: true, status: 'pending', uuid, message: 'GitHub accepted the merge request. Waiting for GitHub to finish.' };
   return { ok: true, status: 'unknown', message: 'GitHub accepted the merge request, but its current state is not available. Check the pull request on GitHub before retrying.' };
 }
@@ -565,12 +565,24 @@ async function mergeGitHubPullRequest(candidate: unknown, pullNumber: unknown, m
 async function getGitHubPullRequestMergeResult(candidate: unknown, pullNumber: unknown, uuidCandidate: unknown) {
   const context = await getPullRequestApiContext(candidate, pullNumber);
   if (!context.ok) return { ok: false, error: context.error };
-  if (typeof uuidCandidate !== 'string' || !/^[0-9a-f-]{36}$/i.test(uuidCandidate)) return { ok: false, error: 'Choose a valid GitHub merge request.' };
-  const response = await githubRequest(`${context.prefix}/pulls/${pullNumber as number}/merge-async/${encodeURIComponent(uuidCandidate)}`, context.token);
-  if (!response.ok) return { ok: false, error: response.status === 404 ? 'GitHub no longer has this merge result. Check the pull request state on GitHub.' : githubApiError(response.status, response.body) };
-  const body = response.body as Record<string, unknown> | null;
+  if (uuidCandidate !== null && (typeof uuidCandidate !== 'string' || !/^[0-9a-f-]{36}$/i.test(uuidCandidate))) return { ok: false, error: 'Choose a valid GitHub merge request.' };
+  let body: Record<string, unknown> | null = null;
+  if (typeof uuidCandidate === 'string') {
+    const response = await githubRequest(`${context.prefix}/pulls/${pullNumber as number}/merge-async/${encodeURIComponent(uuidCandidate)}`, context.token);
+    if (!response.ok) return { ok: false, error: response.status === 404 ? 'GitHub no longer has this merge result. Check the pull request state on GitHub.' : githubApiError(response.status, response.body) };
+    body = response.body as Record<string, unknown> | null;
+  }
   const details = body?.details as Record<string, unknown> | null;
-  return { ok: true, status: typeof body?.status === 'string' ? body.status : 'unknown', message: typeof details?.message === 'string' ? details.message : null, sha: typeof details?.sha === 'string' ? details.sha : null };
+  let status = typeof body?.status === 'string' ? body.status : 'enqueued';
+  let message = typeof details?.message === 'string' ? details.message : null;
+  let sha = typeof details?.sha === 'string' ? details.sha : null;
+  if (status === 'enqueued' || uuidCandidate === null) {
+    const pullResponse = await githubRequest(`${context.prefix}/pulls/${pullNumber as number}`, context.token);
+    if (!pullResponse.ok) return { ok: false, error: githubApiError(pullResponse.status, pullResponse.body) };
+    const pull = pullResponse.body as Record<string, unknown> | null;
+    if (pull?.merged === true) { status = 'merged'; message = 'GitHub reports that the pull request has now merged from its queue.'; sha = typeof pull.merge_commit_sha === 'string' ? pull.merge_commit_sha : sha; }
+  }
+  return { ok: true, status, message, sha };
 }
 
 async function openGitHubUrl(candidate: unknown) {

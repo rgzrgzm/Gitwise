@@ -303,6 +303,17 @@ export default function GitwiseApp() {
   };
 
   useEffect(() => { if (view === 'Pull requests') void loadPullRequests(); }, [view, repoPath, github?.connected, github?.remote?.url]);
+  useEffect(() => {
+    const handleMergeRefresh = (event: Event) => {
+      const detail = (event as CustomEvent<{ repoPath?: string; pullNumber?: number; status?: string }>).detail;
+      if (detail?.repoPath !== repoPath || typeof detail.pullNumber !== 'number' || !Number.isInteger(detail.pullNumber)) return;
+      void loadPullRequests(pullRequestsState, 1, false);
+      void loadPullRequestChecks(detail.pullNumber);
+      if (selectedPullRequest?.number === detail.pullNumber && detail.status !== 'pending' && detail.status !== 'enqueued') void loadPullRequestDetail(detail.pullNumber);
+    };
+    window.addEventListener('gitwise:pull-request-merge-updated', handleMergeRefresh);
+    return () => window.removeEventListener('gitwise:pull-request-merge-updated', handleMergeRefresh);
+  }, [repoPath, pullRequestsState, selectedPullRequest?.number, github?.connected, github?.remote?.url]);
   useEffect(() => { if (view === 'Activity' && github?.connected && github.remote) void loadActivity(1); }, [view, repoPath, github?.connected, github?.remote?.url]);
   useEffect(() => { if (selectedPullRequest) void loadPullRequestChecks(selectedPullRequest.number); }, [selectedPullRequest?.number]);
   useEffect(() => { if (selectedPullRequest) void loadPullRequestDetail(selectedPullRequest.number); else { pullRequestDetailRequest.current += 1; setPullRequestDetail(null); } }, [selectedPullRequest?.number, repoPath]);
