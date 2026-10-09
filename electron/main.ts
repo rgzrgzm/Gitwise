@@ -206,6 +206,30 @@ async function getGitHubPullRequests(candidate: unknown) {
   return { ok: true, pullRequests, checkedAt: new Date().toISOString() };
 }
 
+async function getGitHubPullRequestChecks(candidate: unknown, pullNumber: unknown) {
+  if (typeof pullNumber !== 'number' || !Number.isInteger(pullNumber) || pullNumber < 1 || pullNumber > 100000000) return { ok: false, error: 'Choose a valid pull request.', checks: [] };
+  const repository = await resolveRepository(candidate);
+  if (!repository.ok) return { ok: false, error: repository.error, checks: [] };
+  const [token, remote] = await Promise.all([readGitHubToken(), getGitHubRemote(repository.path)]);
+  if (!token.ok || !token.token) return { ok: false, error: token.error || 'Connect GitHub before loading checks.', checks: [] };
+  if (!remote) return { ok: false, error: 'No github.com remote is configured for this repository.', checks: [] };
+  const prefix = `/repos/${encodeURIComponent(remote.owner)}/${encodeURIComponent(remote.name)}`;
+  const pullResponse = await githubRequest(`${prefix}/pulls/${pullNumber}`, token.token);
+  const pull = pullResponse.body as { head?: { sha?: unknown } } | null;
+  const headSha = pull?.head?.sha;
+  if (!pullResponse.ok || typeof headSha !== 'string') return { ok: false, error: githubApiError(pullResponse.status, pullResponse.body), checks: [] };
+  const response = await githubRequest(`${prefix}/commits/${encodeURIComponent(headSha)}/check-runs?filter=latest&per_page=100`, token.token);
+  const payload = response.body as { check_runs?: unknown } | null;
+  if (!response.ok || !Array.isArray(payload?.check_runs)) return { ok: false, error: githubApiError(response.status, response.body), checks: [] };
+  const checks = payload.check_runs.flatMap((item) => {
+    if (!item || typeof item !== 'object') return [];
+    const check = item as Record<string, unknown>; const appInfo = check.app as Record<string, unknown> | null;
+    if (typeof check.id !== 'number' || typeof check.name !== 'string' || typeof check.status !== 'string') return [];
+    return [{ id: check.id, name: check.name, status: check.status, conclusion: typeof check.conclusion === 'string' ? check.conclusion : null, startedAt: typeof check.started_at === 'string' ? check.started_at : null, completedAt: typeof check.completed_at === 'string' ? check.completed_at : null, url: typeof check.html_url === 'string' ? check.html_url : null, app: typeof appInfo?.name === 'string' ? appInfo.name : null }];
+  });
+  return { ok: true, checks, checkedAt: new Date().toISOString() };
+}
+
 async function openGitHubUrl(candidate: unknown) {
   if (typeof candidate !== 'string') return { ok: false };
   try {
@@ -254,6 +278,7 @@ app.whenReady().then(() => {
   ipcMain.handle('github:connect', (_, token: unknown) => connectGitHub(token));
   ipcMain.handle('github:disconnect', () => disconnectGitHub());
   ipcMain.handle('github:pull-requests', (_, repoPath: unknown) => getGitHubPullRequests(repoPath));
+  ipcMain.handle('github:pull-request-checks', (_, repoPath: unknown, pullNumber: unknown) => getGitHubPullRequestChecks(repoPath, pullNumber));
   ipcMain.handle('github:open-url', (_, url: unknown) => openGitHubUrl(url));
   ipcMain.handle('repo:diff', (_, repoPath: unknown, options?: { path?: string; staged?: boolean; base?: string; compare?: string }) => getDiff(repoPath, options));
   ipcMain.handle('repo:operations', (_, repoPath: unknown) => typeof repoPath === 'string' ? operationLog.filter((item) => item.repositoryPath === path.resolve(repoPath)) : []);

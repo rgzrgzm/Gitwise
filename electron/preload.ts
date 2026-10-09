@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('branchline', {
   connectGitHub: (token: string) => ipcRenderer.invoke('github:connect', token),
   disconnectGitHub: () => ipcRenderer.invoke('github:disconnect'),
   getGitHubPullRequests: (repoPath: string) => ipcRenderer.invoke('github:pull-requests', repoPath),
+  getGitHubPullRequestChecks: (repoPath: string, pullNumber: number) => ipcRenderer.invoke('github:pull-request-checks', repoPath, pullNumber),
   openGitHubUrl: (url: string) => ipcRenderer.invoke('github:open-url', url),
   getDiff: (repoPath: string, options: unknown) => ipcRenderer.invoke('repo:diff', repoPath, options),
   getOperations: (repoPath: string) => ipcRenderer.invoke('repo:operations', repoPath),
