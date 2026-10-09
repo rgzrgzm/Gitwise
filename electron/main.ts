@@ -913,7 +913,19 @@ async function getBranches(candidate: unknown) {
   const format = '%(refname:short)%1f%(refname)%1f%(upstream:short)%1f%(HEAD)%1f%(objectname:short)%1f%(authordate:iso-strict)%1f%(authorname)%1f%(subject)';
   const result = await git(['for-each-ref', `--format=${format}`, 'refs/heads', 'refs/remotes'], repository.path);
   if (!result.ok) return { ok: false, error: result.stderr };
-  return { ok: true, branches: result.stdout.split(/\r?\n/).filter(Boolean).filter((line) => !line.includes('/HEAD\x1f')).map((line) => { const [name, fullName, upstream, head, shortId, date, author, subject] = line.split('\x1f'); return { name, fullName, upstream: upstream || null, current: head === '*', remote: fullName.startsWith('refs/remotes/'), shortId, date, author, subject }; }) };
+  const branches = result.stdout.split(/\r?\n/).filter(Boolean).filter((line) => !line.includes('/HEAD\x1f')).map((line) => { const [name, fullName, upstream, head, shortId, date, author, subject] = line.split('\x1f'); return { name, fullName, upstream: upstream || null, current: head === '*', remote: fullName.startsWith('refs/remotes/'), shortId, date, author, subject, sync: null as null | { ahead: number; behind: number } }; });
+  const tracked = branches.filter((branch) => !branch.remote && branch.upstream && validRef(branch.upstream));
+  for (let offset = 0; offset < tracked.length; offset += 8) {
+    await Promise.all(tracked.slice(offset, offset + 8).map(async (branch) => {
+      const comparison = await git(['rev-list', '--left-right', '--count', `${branch.fullName}...${branch.upstream}`], repository.path);
+      if (!comparison.ok) return;
+      const [aheadText, behindText] = comparison.stdout.trim().split(/\s+/);
+      const ahead = Number(aheadText);
+      const behind = Number(behindText);
+      if (Number.isSafeInteger(ahead) && Number.isSafeInteger(behind) && ahead >= 0 && behind >= 0) branch.sync = { ahead, behind };
+    }));
+  }
+  return { ok: true, branches };
 }
 
 async function getMergePreview(candidate: unknown, sourceCandidate: unknown) {
