@@ -187,14 +187,16 @@ function githubApiError(status: number, body: unknown) {
   return 'GitHub could not load repository data.';
 }
 
-async function getGitHubPullRequests(candidate: unknown) {
+async function getGitHubPullRequests(candidate: unknown, stateCandidate: unknown = 'open', pageCandidate: unknown = 1) {
+  if (!['open', 'closed', 'all'].includes(String(stateCandidate))) return { ok: false, error: 'Choose open, closed, or all pull requests.', pullRequests: [], hasMore: false };
+  if (typeof pageCandidate !== 'number' || !Number.isInteger(pageCandidate) || pageCandidate < 1 || pageCandidate > 1000) return { ok: false, error: 'Choose a valid pull request page.', pullRequests: [], hasMore: false };
   const repository = await resolveRepository(candidate);
   if (!repository.ok) return { ok: false, error: repository.error, pullRequests: [] };
   const [token, remote] = await Promise.all([readGitHubToken(), getGitHubRemote(repository.path)]);
   if (!token.ok || !token.token) return { ok: false, error: token.error || 'Connect GitHub before loading pull requests.', pullRequests: [] };
   if (!remote) return { ok: false, error: 'No github.com remote is configured for this repository.', pullRequests: [] };
-  const response = await githubRequest(`/repos/${encodeURIComponent(remote.owner)}/${encodeURIComponent(remote.name)}/pulls?state=open&sort=updated&direction=desc&per_page=50`, token.token);
-  if (!response.ok || !Array.isArray(response.body)) return { ok: false, error: githubApiError(response.status, response.body), pullRequests: [] };
+  const response = await githubRequest(`/repos/${encodeURIComponent(remote.owner)}/${encodeURIComponent(remote.name)}/pulls?state=${stateCandidate}&sort=updated&direction=desc&per_page=50&page=${pageCandidate}`, token.token);
+  if (!response.ok || !Array.isArray(response.body)) return { ok: false, error: githubApiError(response.status, response.body), pullRequests: [], hasMore: false };
   const pullRequests = response.body.flatMap((item) => {
     if (!item || typeof item !== 'object') return [];
     const pull = item as Record<string, unknown>;
@@ -205,7 +207,7 @@ async function getGitHubPullRequests(candidate: unknown) {
     if (typeof number !== 'number' || typeof title !== 'string' || typeof url !== 'string') return [];
     return [{ number, title, url, draft: Boolean(pull.draft), updatedAt: typeof pull.updated_at === 'string' ? pull.updated_at : null, author: typeof user?.login === 'string' ? user.login : 'Unknown author', authorAvatarUrl: typeof user?.avatar_url === 'string' ? user.avatar_url : null, head: typeof head?.label === 'string' ? head.label : 'Unknown branch', base: typeof base?.label === 'string' ? base.label : 'Unknown branch', comments: typeof pull.comments === 'number' ? pull.comments : 0, reviewComments: typeof pull.review_comments === 'number' ? pull.review_comments : 0 }];
   });
-  return { ok: true, pullRequests, checkedAt: new Date().toISOString() };
+  return { ok: true, pullRequests, hasMore: response.hasNextPage, page: pageCandidate, checkedAt: new Date().toISOString() };
 }
 
 function normalizeGitHubActivity(events: unknown[], owner: string, name: string) {
@@ -413,7 +415,7 @@ app.whenReady().then(() => {
   ipcMain.handle('github:status', (_, repoPath: unknown) => getGitHubStatus(repoPath));
   ipcMain.handle('github:connect', (_, token: unknown) => connectGitHub(token));
   ipcMain.handle('github:disconnect', () => disconnectGitHub());
-  ipcMain.handle('github:pull-requests', (_, repoPath: unknown) => getGitHubPullRequests(repoPath));
+  ipcMain.handle('github:pull-requests', (_, repoPath: unknown, state: unknown, page: unknown) => getGitHubPullRequests(repoPath, state, page));
   ipcMain.handle('github:activity', (_, repoPath: unknown, page: unknown) => getGitHubActivity(repoPath, page));
   ipcMain.handle('github:pull-request-details', (_, repoPath: unknown, pullNumber: unknown) => getGitHubPullRequestDetails(repoPath, pullNumber));
   ipcMain.handle('github:pull-request-readiness', async (_, repoPath: unknown, pullNumber: unknown) => {

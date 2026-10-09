@@ -15,7 +15,7 @@ contextBridge.exposeInMainWorld('branchline', {
   getGitHubStatus: (repoPath: string) => ipcRenderer.invoke('github:status', repoPath),
   connectGitHub: (token: string) => ipcRenderer.invoke('github:connect', token),
   disconnectGitHub: () => ipcRenderer.invoke('github:disconnect'),
-  getGitHubPullRequests: (repoPath: string) => ipcRenderer.invoke('github:pull-requests', repoPath),
+  getGitHubPullRequests: (repoPath: string, state: 'open' | 'closed' | 'all', page: number) => ipcRenderer.invoke('github:pull-requests', repoPath, state, page),
   getGitHubActivity: (repoPath: string, page: number) => ipcRenderer.invoke('github:activity', repoPath, page),
   getGitHubPullRequestDetails: (repoPath: string, pullNumber: number) => ipcRenderer.invoke('github:pull-request-details', repoPath, pullNumber),
   getGitHubPullRequestReadiness: (repoPath: string, pullNumber: number) => ipcRenderer.invoke('github:pull-request-readiness', repoPath, pullNumber),
