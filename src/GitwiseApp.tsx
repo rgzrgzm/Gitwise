@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { Activity, ArrowDown, ArrowUp, CheckCircle2, ChevronDown, CloudOff, Code2, FileCode2, FolderOpen, GitBranch, GitCommitHorizontal, GitCompareArrows, History, Home, Layers3, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
 import './gitwise.css';
 import { MergeReadinessPanel } from './components/MergeReadinessPanel';
@@ -20,7 +20,7 @@ type PullRequest = { number: number; title: string; url: string; draft: boolean;
 type PullRequestCheck = { id: number; name: string; status: string; conclusion: string | null; startedAt: string | null; completedAt: string | null; url: string | null; app: string | null };
 type PullRequestSection = 'commits' | 'files' | 'reviews' | 'comments' | 'review-comments';
 type PullRequestEntry = { id: string | number; title: string; author?: string; date?: string | null; url?: string | null; body?: string; status?: string; additions?: number; deletions?: number; patch?: string | null };
-type PullRequestDetail = { repositoryPath: string; number: number; title: string; body: string; state: string; draft: boolean; updatedAt: string | null; head: string; base: string; url: string | null; sections: Record<PullRequestSection, { items: PullRequestEntry[]; hasMore: boolean; page: number }> };
+type PullRequestDetail = { repositoryPath: string; number: number; title: string; body: string; state: string; draft: boolean; updatedAt: string | null; head: string; base: string; url: string | null; requestedReviewers: Array<{ login: string; avatarUrl: string | null }>; requestedTeams: Array<{ slug: string; name: string }>; sections: Record<PullRequestSection, { items: PullRequestEntry[]; hasMore: boolean; page: number }> };
 type ActivityEvent = { id: string; kind: string; actor: string; title: string; summary: string; branch: string; branches: string[]; createdAt: string; url: string | null; avatarUrl: string | null; number: number | null };
 type Branch = { name: string; fullName: string; upstream: string | null; current: boolean; remote: boolean; shortId: string; date: string; author: string; subject: string };
 type OperationRecord = { id: string; label: string; ok: boolean; at: string; detail: string };
@@ -475,10 +475,37 @@ function PullRequestContent({ detail, loading, error, loadMore, sectionLoading, 
   if (error) return <p className="check-empty error-text" role="alert">{error}</p>;
   if (!detail) return <p className="check-empty">Pull request details have not loaded.</p>;
   const labels: Array<{ key: PullRequestSection; title: string }> = [{ key: 'commits', title: 'Commits' }, { key: 'files', title: 'Changed files' }, { key: 'reviews', title: 'Reviews' }, { key: 'comments', title: 'Discussion' }, { key: 'review-comments', title: 'Inline review comments' }];
-  return <section className="pull-content"><MergeReadinessPanel key={`${detail.repositoryPath}:${detail.number}`} repoPath={detail.repositoryPath} pullNumber={detail.number} /><div className="pull-content-summary"><div className="pull-content-branches"><code>{detail.head}</code><span>into</span><code>{detail.base}</code></div><p className="pull-content-description">{detail.body || 'No description provided.'}</p><span className="pull-content-updated">Updated {relativeTime(detail.updatedAt || new Date().toISOString())}</span></div>{labels.map(({ key, title }) => {
+  return <section className="pull-content"><MergeReadinessPanel key={`${detail.repositoryPath}:${detail.number}`} repoPath={detail.repositoryPath} pullNumber={detail.number} /><div className="pull-content-summary"><div className="pull-content-branches"><code>{detail.head}</code><span>into</span><code>{detail.base}</code></div><p className="pull-content-description">{detail.body || 'No description provided.'}</p><span className="pull-content-updated">Updated {relativeTime(detail.updatedAt || new Date().toISOString())}</span></div><ReviewRequestPanel key={`${detail.repositoryPath}:${detail.number}`} detail={detail} />{labels.map(({ key, title }) => {
     const section = detail.sections[key];
     return <details className="pull-content-section" key={key}><summary><span>{title}</span><span className="muted">{section.items.length}{section.hasMore ? '+' : ''}</span></summary>{section.items.length === 0 ? <p className="pull-content-empty">No {title.toLowerCase()} yet.</p> : <div className="pull-content-entries">{section.items.map((item) => <article className="pull-content-entry" key={item.id}><div className="pull-content-entry-heading"><strong title={item.title}>{item.title}</strong>{item.status && <span className="status-tag">{item.status}</span>}{item.additions !== undefined && <span className="pull-file-counts"><span>+{item.additions}</span> <span>−{item.deletions}</span></span>}</div>{(item.author || item.date) && <span className="pull-content-meta">{item.author || ''}{item.author && item.date ? ' · ' : ''}{item.date ? relativeTime(item.date) : ''}</span>}{item.body && <p className="pull-content-body">{item.body}</p>}{item.patch && <pre className="pull-content-patch">{item.patch}</pre>}{item.url && <button className="text-button pull-content-link" type="button" onClick={() => void window.branchline?.openGitHubUrl(item.url!)}>Open on GitHub</button>}</article>)}</div>}{section.hasMore && <button type="button" className="text-button pull-load-more" disabled={sectionLoading === key} onClick={() => loadMore(key)}>{sectionLoading === key ? 'Loading…' : `Load more ${title.toLowerCase()}`}</button>}{key === 'comments' && <PullRequestCommentForm repoPath={detail.repositoryPath} pullNumber={detail.number} onPosted={onCommentPosted} />}</details>;
   })}</section>;
+}
+
+function ReviewRequestPanel({ detail }: { detail: PullRequestDetail }) {
+  const [usersText, setUsersText] = useState('');
+  const [teamsText, setTeamsText] = useState('');
+  const [reviewers, setReviewers] = useState(detail.requestedReviewers || []);
+  const [teams, setTeams] = useState(detail.requestedTeams || []);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('');
+  const [isError, setIsError] = useState(false);
+  const canRequest = detail.state === 'open';
+  const parse = (value: string) => [...new Set(value.split(/[\s,;]+/).map((item) => item.trim()).filter(Boolean))];
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    const users = parse(usersText);
+    const requestedTeams = parse(teamsText);
+    if (!users.length && !requestedTeams.length) { setIsError(true); setMessage('Enter at least one GitHub username or team slug.'); return; }
+    setBusy(true); setMessage('');
+    try {
+      const result = await window.branchline?.requestGitHubPullRequestReviewers(detail.repositoryPath, detail.number, users, requestedTeams) as { ok: boolean; confirmed?: boolean; requestedReviewers?: typeof reviewers; requestedTeams?: typeof teams; error?: string } | undefined;
+      if (!result?.ok) { setIsError(true); setMessage(result?.error || 'Unable to request reviewers.'); return; }
+      if (result.confirmed) { setReviewers(result.requestedReviewers || []); setTeams(result.requestedTeams || []); setUsersText(''); setTeamsText(''); }
+      setIsError(false); setMessage(result.confirmed ? 'Reviewer requests updated from GitHub.' : (result.error || 'GitHub accepted the request. Refresh to confirm the reviewer list.'));
+    } catch (error) { setIsError(true); setMessage(error instanceof Error ? error.message : 'Unable to request reviewers.'); }
+    finally { setBusy(false); }
+  };
+  return <section className="review-request-panel" aria-labelledby="review-request-title"><div className="review-request-heading"><div><span className="eyebrow">Review coordination</span><h3 id="review-request-title">Requested reviewers</h3></div><span className="muted">{reviewers.length + teams.length}</span></div>{reviewers.length + teams.length > 0 ? <div className="review-request-tags">{reviewers.map((reviewer) => <span className="review-request-tag" key={reviewer.login}>{reviewer.avatarUrl && <img src={reviewer.avatarUrl} alt="" />}@{reviewer.login}</span>)}{teams.map((team) => <span className="review-request-tag" key={team.slug}>{team.name}</span>)}</div> : <p className="review-request-empty">No reviewers have been requested for this pull request.</p>}<form onSubmit={(event) => void submit(event)} className="review-request-form"><label>GitHub usernames<input value={usersText} onChange={(event) => setUsersText(event.target.value)} placeholder="octocat, teammate" disabled={!canRequest || busy} autoComplete="off" /><small>Separate multiple usernames with commas or spaces.</small></label><label>Team slugs<input value={teamsText} onChange={(event) => setTeamsText(event.target.value)} placeholder="engineering, frontend" disabled={!canRequest || busy} autoComplete="off" /><small>Use the team slug from its GitHub URL.</small></label>{message && <p className={isError ? 'connection-error' : 'review-request-success'} role={isError ? 'alert' : 'status'}>{message}</p>}<button className="ghost-button" type="submit" disabled={!canRequest || busy}>{busy ? 'Requesting…' : 'Request review'}</button>{!canRequest && <small>Reviewer requests are available for open pull requests only.</small>}</form></section>;
 }
 function GitHubConnectionView({ connected, onOpen, github, token, setToken, busy, connect, disconnect, title, detail }: { connected: boolean; onOpen: () => void; github: GitHubConnection | null; token: string; setToken: (value: string) => void; busy: boolean; connect: () => void; disconnect: () => void; title: string; detail: string }) {
   if (!connected) return <Empty onOpen={onOpen} />;

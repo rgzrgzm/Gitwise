@@ -393,7 +393,9 @@ async function getGitHubPullRequestDetails(candidate: unknown, pullNumber: unkno
     const section = sections[index];
     data[section] = { items: normalizePullRequestSection(section, response.body), hasMore: response.hasNextPage, page: 1 };
   }
-  return { ok: true, pullRequest: { number, title: pull.title, body: typeof pull.body === 'string' ? pull.body : '', state: typeof pull.state === 'string' ? pull.state : 'unknown', draft: Boolean(pull.draft), updatedAt: typeof pull.updated_at === 'string' ? pull.updated_at : null, head: typeof (pull.head as Record<string, unknown> | null)?.label === 'string' ? (pull.head as { label: string }).label : 'Unknown branch', base: typeof (pull.base as Record<string, unknown> | null)?.label === 'string' ? (pull.base as { label: string }).label : 'Unknown branch', url: typeof pull.html_url === 'string' ? pull.html_url : null, sections: data, repositoryPath: context.repositoryPath }, checkedAt: new Date().toISOString() };
+  const requestedReviewers = Array.isArray(pull.requested_reviewers) ? pull.requested_reviewers.flatMap((item) => { const reviewer = item as Record<string, unknown>; return typeof reviewer.login === 'string' ? [{ login: reviewer.login, avatarUrl: typeof reviewer.avatar_url === 'string' ? reviewer.avatar_url : null }] : []; }) : [];
+  const requestedTeams = Array.isArray(pull.requested_teams) ? pull.requested_teams.flatMap((item) => { const team = item as Record<string, unknown>; return typeof team.slug === 'string' ? [{ slug: team.slug, name: typeof team.name === 'string' ? team.name : team.slug }] : []; }) : [];
+  return { ok: true, pullRequest: { number, title: pull.title, body: typeof pull.body === 'string' ? pull.body : '', state: typeof pull.state === 'string' ? pull.state : 'unknown', draft: Boolean(pull.draft), updatedAt: typeof pull.updated_at === 'string' ? pull.updated_at : null, head: typeof (pull.head as Record<string, unknown> | null)?.label === 'string' ? (pull.head as { label: string }).label : 'Unknown branch', base: typeof (pull.base as Record<string, unknown> | null)?.label === 'string' ? (pull.base as { label: string }).label : 'Unknown branch', url: typeof pull.html_url === 'string' ? pull.html_url : null, requestedReviewers, requestedTeams, sections: data, repositoryPath: context.repositoryPath }, checkedAt: new Date().toISOString() };
 }
 
 async function getGitHubPullRequestSection(candidate: unknown, pullNumber: unknown, sectionCandidate: unknown, pageCandidate: unknown) {
@@ -424,6 +426,39 @@ async function createGitHubPullRequestComment(candidate: unknown, pullNumber: un
   const comment = normalizePullRequestSection('comments', [response.body])[0] as Record<string, unknown> | undefined;
   if (!comment || !comment.id) return { ok: false, error: 'GitHub accepted the comment but returned incomplete details. Refresh the discussion to confirm it was posted.' };
   return { ok: true, comment };
+}
+
+async function requestGitHubPullRequestReviewers(candidate: unknown, pullNumber: unknown, usersCandidate: unknown, teamsCandidate: unknown) {
+  const context = await getPullRequestApiContext(candidate, pullNumber);
+  if (!context.ok) return { ok: false, error: context.error };
+  const validSlugs = (value: unknown) => Array.isArray(value) && value.every((entry) => typeof entry === 'string' && entry.length <= 100 && /^[A-Za-z0-9][A-Za-z0-9-]*$/.test(entry));
+  if (!validSlugs(usersCandidate) || !validSlugs(teamsCandidate)) return { ok: false, error: 'Enter valid GitHub usernames and team slugs.' };
+  const users = [...new Set(usersCandidate as string[])];
+  const teams = [...new Set(teamsCandidate as string[])];
+  if (users.length + teams.length === 0 || users.length + teams.length > 15) return { ok: false, error: 'Choose between 1 and 15 reviewers or teams.' };
+  const number = pullNumber as number;
+  const current = await githubRequest(`${context.prefix}/pulls/${number}`, context.token);
+  if (!current.ok) return { ok: false, error: githubApiError(current.status, current.body) };
+  const pull = current.body as Record<string, unknown> | null;
+  if (!pull || pull.state !== 'open') return { ok: false, error: 'Reviewers can only be requested on an open pull request.' };
+  const response = await githubRequest(`${context.prefix}/pulls/${number}/requested_reviewers`, context.token, 'POST', { reviewers: users, team_reviewers: teams });
+  if (!response.ok) {
+    if (response.status === 403) return { ok: false, error: 'GitHub denied this request. Check repository write access, organization approval, and Pull requests: Write permission.' };
+    if (response.status === 422) return { ok: false, error: 'GitHub could not request one or more reviewers. Check the usernames, team slugs, and repository access, then try again.' };
+    return { ok: false, error: githubApiError(response.status, response.body) };
+  }
+  const refreshed = await githubRequest(`${context.prefix}/pulls/${number}`, context.token);
+  if (!refreshed.ok || !refreshed.body || typeof refreshed.body !== 'object') return { ok: true, confirmed: false, error: 'GitHub accepted the request. Refresh the pull request to confirm the current reviewer list.' };
+  const updated = refreshed.body as Record<string, unknown>;
+  const requestedReviewers = Array.isArray(updated.requested_reviewers) ? updated.requested_reviewers.flatMap((item) => {
+    const reviewer = item as Record<string, unknown>;
+    return typeof reviewer.login === 'string' ? [{ login: reviewer.login, avatarUrl: typeof reviewer.avatar_url === 'string' ? reviewer.avatar_url : null }] : [];
+  }) : [];
+  const requestedTeams = Array.isArray(updated.requested_teams) ? updated.requested_teams.flatMap((item) => {
+    const team = item as Record<string, unknown>;
+    return typeof team.slug === 'string' ? [{ slug: team.slug, name: typeof team.name === 'string' ? team.name : team.slug }] : [];
+  }) : [];
+  return { ok: true, confirmed: true, requestedReviewers, requestedTeams };
 }
 
 async function getGitHubPullRequestChecks(candidate: unknown, pullNumber: unknown) {
@@ -509,6 +544,7 @@ app.whenReady().then(() => {
   });
   ipcMain.handle('github:pull-request-section', (_, repoPath: unknown, pullNumber: unknown, section: unknown, page: unknown) => getGitHubPullRequestSection(repoPath, pullNumber, section, page));
   ipcMain.handle('github:create-pull-request-comment', (_, repoPath: unknown, pullNumber: unknown, body: unknown) => createGitHubPullRequestComment(repoPath, pullNumber, body));
+  ipcMain.handle('github:request-pull-request-reviewers', (_, repoPath: unknown, pullNumber: unknown, users: unknown, teams: unknown) => requestGitHubPullRequestReviewers(repoPath, pullNumber, users, teams));
   ipcMain.handle('github:pull-request-checks', (_, repoPath: unknown, pullNumber: unknown) => getGitHubPullRequestChecks(repoPath, pullNumber));
   ipcMain.handle('github:open-url', (_, url: unknown) => openGitHubUrl(url));
   ipcMain.handle('repo:diff', (_, repoPath: unknown, options?: { path?: string; staged?: boolean; base?: string; compare?: string }) => getDiff(repoPath, options));
