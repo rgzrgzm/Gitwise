@@ -5,6 +5,7 @@ import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import https from 'node:https';
 import { fetchReadiness } from './github-readiness';
+import { submitGroupedReview } from './github-review';
 
 const execFileAsync = promisify(execFile);
 
@@ -431,39 +432,22 @@ async function createGitHubPullRequestComment(candidate: unknown, pullNumber: un
 async function submitGitHubPullRequestReview(candidate: unknown, pullNumber: unknown, eventCandidate: unknown, bodyCandidate: unknown, commentsCandidate: unknown = []) {
   const context = await getPullRequestApiContext(candidate, pullNumber);
   if (!context.ok) return { ok: false, error: context.error };
-  if (eventCandidate !== 'COMMENT' && eventCandidate !== 'APPROVE' && eventCandidate !== 'REQUEST_CHANGES') return { ok: false, error: 'Choose comment, approve, or request changes.' };
-  if (typeof bodyCandidate !== 'string' || bodyCandidate.length > 65536 || (eventCandidate !== 'APPROVE' && !bodyCandidate.trim())) return { ok: false, error: eventCandidate === 'APPROVE' ? 'The review summary must be 65,536 characters or fewer.' : 'Add a summary before submitting a comment or requesting changes.' };
-  if (!Array.isArray(commentsCandidate) || commentsCandidate.length > 50) return { ok: false, error: 'A grouped review can include up to 50 inline comments.' };
-  const comments: Array<{ path: string; line: number; side: 'LEFT' | 'RIGHT'; body: string }> = [];
-  for (const candidateComment of commentsCandidate) {
-    if (!candidateComment || typeof candidateComment !== 'object') return { ok: false, error: 'One of the review comments is invalid.' };
-    const comment = candidateComment as Record<string, unknown>;
-    if (typeof comment.path !== 'string' || !validPaths([comment.path]) || typeof comment.line !== 'number' || !Number.isInteger(comment.line) || comment.line < 1 || comment.line > 2000000 || (comment.side !== 'LEFT' && comment.side !== 'RIGHT') || typeof comment.body !== 'string' || !comment.body.trim() || comment.body.length > 65536) return { ok: false, error: 'One of the review comments has an invalid file, line, side, or message.' };
-    comments.push({ path: comment.path, line: comment.line, side: comment.side, body: comment.body.trim() });
-  }
-  const number = pullNumber as number;
-  const current = await githubRequest(`${context.prefix}/pulls/${number}`, context.token);
-  if (!current.ok) return { ok: false, error: githubApiError(current.status, current.body) };
-  const pull = current.body as Record<string, unknown> | null;
-  const head = pull?.head as Record<string, unknown> | null;
-  if (!pull || pull.state !== 'open') return { ok: false, error: 'This pull request is no longer open. Refresh it before submitting a review.' };
-  if (typeof head?.sha !== 'string') return { ok: false, error: 'GitHub did not provide the latest commit. Refresh the pull request and try again.' };
-  const response = await githubRequest(`${context.prefix}/pulls/${number}/reviews`, context.token, 'POST', { commit_id: head.sha, event: eventCandidate, ...(bodyCandidate.trim() ? { body: bodyCandidate.trim() } : {}), ...(comments.length ? { comments } : {}) });
-  if (!response.ok) {
-    if (response.status === 403) return { ok: false, error: 'GitHub denied this review. Check repository write access, organization approval, and Pull requests: Write permission.' };
-    if (response.status === 422) return { ok: false, error: 'GitHub could not submit this review. You may not be able to review this pull request, or its state may have changed. Refresh and try again.' };
-    return { ok: false, error: githubApiError(response.status, response.body) };
-  }
-  const review = response.body as Record<string, unknown> | null;
-  if (!review || typeof review.id !== 'number') return { ok: true, confirmed: false, error: 'GitHub accepted the review but returned incomplete details. Refresh the reviews section to confirm submission.' };
-  const user = review.user as Record<string, unknown> | null;
-  const item = { id: review.id, title: typeof review.state === 'string' ? review.state.replace(/_/g, ' ').toLowerCase() : String(eventCandidate).toLowerCase(), author: typeof user?.login === 'string' ? user.login : 'You', body: typeof review.body === 'string' ? review.body : '', date: typeof review.submitted_at === 'string' ? review.submitted_at : new Date().toISOString(), url: typeof review.html_url === 'string' ? review.html_url : null };
-  if (!comments.length) return { ok: true, confirmed: true, review: item, comments: [] };
-  const submittedComments = await githubRequest(`${context.prefix}/pulls/${number}/comments?per_page=100&page=1&sort=created&direction=desc`, context.token);
-  if (!submittedComments.ok || !Array.isArray(submittedComments.body)) return { ok: true, confirmed: false, error: 'The review was submitted. Refresh inline comments to confirm the grouped notes.', review: item, comments: [] };
-  const related = (submittedComments.body as Array<Record<string, unknown>>).filter((comment) => comment.pull_request_review_id === review.id);
-  const normalized = normalizePullRequestSection('review-comments', related) as Array<Record<string, unknown>>;
-  return { ok: true, confirmed: true, review: item, comments: normalized };
+  return submitGroupedReview({
+    prefix: context.prefix,
+    token: context.token,
+    number: pullNumber as number,
+    event: eventCandidate,
+    body: bodyCandidate,
+    comments: commentsCandidate,
+    request: githubRequest,
+    validPath: (filePath) => validPaths([filePath]),
+    apiError: githubApiError,
+    normalizeReview: (review, event) => {
+      const user = review.user as Record<string, unknown> | null;
+      return { id: review.id as number, title: typeof review.state === 'string' ? review.state.replace(/_/g, ' ').toLowerCase() : event.toLowerCase(), author: typeof user?.login === 'string' ? user.login : 'You', body: typeof review.body === 'string' ? review.body : '', date: typeof review.submitted_at === 'string' ? review.submitted_at : new Date().toISOString(), url: typeof review.html_url === 'string' ? review.html_url : null };
+    },
+    normalizeComments: (comments) => normalizePullRequestSection('review-comments', comments) as Array<Record<string, unknown>>
+  });
 }
 
 async function createGitHubPullRequestInlineComment(candidate: unknown, pullNumber: unknown, pathCandidate: unknown, lineCandidate: unknown, sideCandidate: unknown, bodyCandidate: unknown) {
