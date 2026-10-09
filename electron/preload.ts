@@ -23,6 +23,7 @@ contextBridge.exposeInMainWorld('branchline', {
   getGitHubPullRequestReadiness: (repoPath: string, pullNumber: number) => ipcRenderer.invoke('github:pull-request-readiness', repoPath, pullNumber),
   getGitHubPullRequestSection: (repoPath: string, pullNumber: number, section: string, page: number) => ipcRenderer.invoke('github:pull-request-section', repoPath, pullNumber, section, page),
   createGitHubPullRequestComment: (repoPath: string, pullNumber: number, body: string) => ipcRenderer.invoke('github:create-pull-request-comment', repoPath, pullNumber, body),
+  submitGitHubPullRequestReview: (repoPath: string, pullNumber: number, event: 'COMMENT' | 'APPROVE' | 'REQUEST_CHANGES', body: string) => ipcRenderer.invoke('github:submit-pull-request-review', repoPath, pullNumber, event, body),
   requestGitHubPullRequestReviewers: (repoPath: string, pullNumber: number, users: string[], teams: string[]) => ipcRenderer.invoke('github:request-pull-request-reviewers', repoPath, pullNumber, users, teams),
   getGitHubPullRequestChecks: (repoPath: string, pullNumber: number) => ipcRenderer.invoke('github:pull-request-checks', repoPath, pullNumber),
   openGitHubUrl: (url: string) => ipcRenderer.invoke('github:open-url', url),
