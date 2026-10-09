@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 export {};
 
 declare global {
@@ -20,6 +21,7 @@ declare global {
       getGitHubPullRequests: (repoPath: string) => Promise<unknown>;
       getGitHubActivity: (repoPath: string, page: number) => Promise<unknown>;
       getGitHubPullRequestDetails: (repoPath: string, pullNumber: number) => Promise<unknown>;
+      getGitHubPullRequestReadiness: (repoPath: string, pullNumber: number) => Promise<unknown>;
       getGitHubPullRequestSection: (repoPath: string, pullNumber: number, section: string, page: number) => Promise<unknown>;
       getGitHubPullRequestChecks: (repoPath: string, pullNumber: number) => Promise<unknown>;
       openGitHubUrl: (url: string) => Promise<unknown>;

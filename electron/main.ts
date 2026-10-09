@@ -4,6 +4,7 @@ import { promisify } from 'node:util';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import https from 'node:https';
+import { fetchReadiness } from './github-readiness';
 
 const execFileAsync = promisify(execFile);
 
@@ -305,7 +306,7 @@ async function getPullRequestApiContext(candidate: unknown, pullNumber: unknown)
   const [token, remote] = await Promise.all([readGitHubToken(), getGitHubRemote(repository.path)]);
   if (!token.ok || !token.token) return { ok: false as const, error: token.error || 'Connect GitHub before loading pull request details.' };
   if (!remote) return { ok: false as const, error: 'No github.com remote is configured for this repository.' };
-  return { ok: true as const, token: token.token, prefix: `/repos/${encodeURIComponent(remote.owner)}/${encodeURIComponent(remote.name)}` };
+  return { ok: true as const, token: token.token, owner: remote.owner, name: remote.name, prefix: `/repos/${encodeURIComponent(remote.owner)}/${encodeURIComponent(remote.name)}`, repositoryPath: repository.path };
 }
 
 async function getGitHubPullRequestDetails(candidate: unknown, pullNumber: unknown) {
@@ -327,7 +328,7 @@ async function getGitHubPullRequestDetails(candidate: unknown, pullNumber: unkno
     const section = sections[index];
     data[section] = { items: normalizePullRequestSection(section, response.body), hasMore: response.hasNextPage, page: 1 };
   }
-  return { ok: true, pullRequest: { number, title: pull.title, body: typeof pull.body === 'string' ? pull.body : '', state: typeof pull.state === 'string' ? pull.state : 'unknown', draft: Boolean(pull.draft), updatedAt: typeof pull.updated_at === 'string' ? pull.updated_at : null, head: typeof (pull.head as Record<string, unknown> | null)?.label === 'string' ? (pull.head as { label: string }).label : 'Unknown branch', base: typeof (pull.base as Record<string, unknown> | null)?.label === 'string' ? (pull.base as { label: string }).label : 'Unknown branch', url: typeof pull.html_url === 'string' ? pull.html_url : null }, sections: data, checkedAt: new Date().toISOString() };
+  return { ok: true, pullRequest: { number, title: pull.title, body: typeof pull.body === 'string' ? pull.body : '', state: typeof pull.state === 'string' ? pull.state : 'unknown', draft: Boolean(pull.draft), updatedAt: typeof pull.updated_at === 'string' ? pull.updated_at : null, head: typeof (pull.head as Record<string, unknown> | null)?.label === 'string' ? (pull.head as { label: string }).label : 'Unknown branch', base: typeof (pull.base as Record<string, unknown> | null)?.label === 'string' ? (pull.base as { label: string }).label : 'Unknown branch', url: typeof pull.html_url === 'string' ? pull.html_url : null, sections: data, repositoryPath: context.repositoryPath }, checkedAt: new Date().toISOString() };
 }
 
 async function getGitHubPullRequestSection(candidate: unknown, pullNumber: unknown, sectionCandidate: unknown, pageCandidate: unknown) {
@@ -415,6 +416,11 @@ app.whenReady().then(() => {
   ipcMain.handle('github:pull-requests', (_, repoPath: unknown) => getGitHubPullRequests(repoPath));
   ipcMain.handle('github:activity', (_, repoPath: unknown, page: unknown) => getGitHubActivity(repoPath, page));
   ipcMain.handle('github:pull-request-details', (_, repoPath: unknown, pullNumber: unknown) => getGitHubPullRequestDetails(repoPath, pullNumber));
+  ipcMain.handle('github:pull-request-readiness', async (_, repoPath: unknown, pullNumber: unknown) => {
+    const context = await getPullRequestApiContext(repoPath, pullNumber);
+    if (!context.ok) return { ok: false, error: context.error };
+    return fetchReadiness(context.token, context.owner, context.name, pullNumber as number);
+  });
   ipcMain.handle('github:pull-request-section', (_, repoPath: unknown, pullNumber: unknown, section: unknown, page: unknown) => getGitHubPullRequestSection(repoPath, pullNumber, section, page));
   ipcMain.handle('github:pull-request-checks', (_, repoPath: unknown, pullNumber: unknown) => getGitHubPullRequestChecks(repoPath, pullNumber));
   ipcMain.handle('github:open-url', (_, url: unknown) => openGitHubUrl(url));

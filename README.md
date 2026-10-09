@@ -15,6 +15,8 @@ npm run dev
 npm run build
 ```
 
+Run merge-readiness regression tests with `npm run test:readiness`. These exercise blocker interpretation and mocked GitHub error/partial-response handling without changing repositories or contacting GitHub.
+
 ## Current local Git capabilities
 
 - Open and persist validated local Git repositories.
@@ -24,7 +26,7 @@ npm run build
 - Review real staged, unstaged, and untracked files; stage or unstage whole files or individual text-diff hunks, discard with confirmation, create stashes, apply or restore a selected stash, and commit staged work.
 - Search local commit messages, load history in pages, and inspect commit metadata, changed files, and file diffs.
 
-GitHub account linking is available from the Pull requests and Activity workspaces. Gitwise validates a fine-grained personal access token, stores it using Electron's platform credential protection, and detects a matching github.com remote. The Pull requests workspace loads real open pull requests; selecting one loads its description, commits, changed files, reviews, conversation comments, inline review comments, and check runs. Long sections are paginated on demand and items link back to GitHub. Activity shows available pushed commits and pull-request events with contributor, branch, and date filters. Mergeability/ruleset evaluation and pull-request creation are not loaded yet; those workflows state that limitation instead of showing fabricated data.
+GitHub account linking is available from the Pull requests and Activity workspaces. Gitwise validates a fine-grained personal access token, stores it using Electron's platform credential protection, and detects a matching github.com remote. The Pull requests workspace loads real open pull requests; selecting one loads its description, commits, changed files, reviews, conversation comments, inline review comments, and check runs. Long sections are paginated on demand and items link back to GitHub. Activity shows available pushed commits and pull-request events with contributor, branch, and date filters. PR details also show GitHub-reported merge readiness, combined check/status results, review decisions, and available classic branch-protection requirements. Missing or inaccessible requirements are not treated as approval. Additional rulesets, queues, deployments, and permissions may apply; Gitwise does not yet create or merge pull requests.
 
 ## Security model
 
